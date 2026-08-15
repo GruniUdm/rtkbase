@@ -9,17 +9,18 @@ window.operateEvents = {
     'click #log_delete': function (e, value, row, index) {
         document.querySelector('#filename').textContent = row.name;
         $('#deleteModal').modal();
-        //put filename inside button attribute data.row to get it when the user
-        // click on the confirm delete button.
         $('#confirm-delete-button').data.row = row;
-        //document.getElementById("confirm-delete-button").dataset.row = row.name;
     },
     'click #log_edit': function(e, value, row, index) {
         document.querySelector('#filename').textContent = row.name;
-        //console.log(row.format);
+        if ( row.format.split(".").pop() === "ZIP") {
+            createRinexBtnElt.removeAttribute('disabled');
+        }
+        else {
+            createRinexBtnElt.setAttribute('disabled', '');
+        }
         $('#editModal').modal();
         createRinexBtnElt.dataset.filename = row.name;
-        //$('#rinex-create-button').data.row = row;
     }
 };
 
@@ -30,31 +31,24 @@ $('#confirm-delete-button').on("click", function (){
 createRinexBtnElt.onclick = function (){
     socket.emit("rinex conversion", {"filename": createRinexBtnElt.dataset.filename, "rinex-preset" : document.querySelector("#editModal a.active").dataset.rinexPreset});
     $(this).html('<span class="spinner-border spinner-border-sm"></span> Creating Rinex...');
-    // Cleaning messages if previous conversion failed
     document.getElementById("rinex-conversion-msg").replaceChildren();
 };
 
 $(document).ready(function () {
 
-    // SocketIO namespace:
     namespace = "/test";
-
-    // initiate SocketIO connection
     socket = io.connect(namespace);
 
-    // say hello on connect
     socket.on("connect", function () {
         socket.emit("browser connected", {data: "I'm connected"});
     });
 
-    //console.log("log.js Asking for the available logs");
     socket.emit("get logs list");
 
     socket.on('disconnect', function(){
         console.log('disconnected');
     });
 
-    //Clean edit modal content when closing it
     $("#editModal").on('hidden.bs.modal', function(){
         socket.emit("get logs list");
         var failedTitleElt = document.getElementById("failed_title");
@@ -72,7 +66,6 @@ $(document).ready(function () {
        // ################" TABLE ##########################"
 
     socket.on('available logs', function(msg){
-        //console.log("New log list available");
         
         var actionDownloadElt = document.createElement("a");
         actionDownloadElt.href = "#";
@@ -114,28 +107,47 @@ $(document).ready(function () {
             deleteImg.setAttribute("height", "25");
         actionDeleteElt.appendChild(deleteImg);
 
-        // Adding icons for file's actions
         for (log of msg) {
             actionDownloadElt.href = "/logs/download/" + log.name
-            //some download examples : https://pythonise.com/series/learning-flask/sending-files-with-flask
-            log['actions'] = actionDownloadElt.outerHTML + actionEditElt.outerHTML + actionDeleteElt.outerHTML;
+            if (log.format === "TRACK") {
+                var ip = log.name.replace("tracks/", "").replace(".csv", "");
+                var m = ip.match(/^(.+?)_\d{8}_\d{6}$/);
+                if (m) { ip = m[1]; } else { ip = ip.replace(/_/g, "."); }
+                var cb = document.createElement("input");
+                cb.type = "checkbox";
+                cb.className = "mx-1 track-cb";
+                cb.title = "Show on map";
+                cb.setAttribute('data-ip', ip);
+                var stored = [];
+                try { stored = JSON.parse(localStorage.getItem("tractor_tracks_show") || "[]"); } catch(e) {}
+                if (stored.indexOf(ip) !== -1) cb.setAttribute('checked', '');
+                log['actions'] = cb.outerHTML + actionDownloadElt.outerHTML + actionDeleteElt.outerHTML;
+            } else {
+                log['actions'] = actionDownloadElt.outerHTML + actionEditElt.outerHTML + actionDeleteElt.outerHTML;
+            }
         }
 
-        // Updating the table content
         $('#logtable').bootstrapTable('removeAll');
-        
         $('#logtable').bootstrapTable('load', msg);
-        //var zz = $('#logtable').bootstrapTable('getData');
-        //console.log(" table data : ");
-        //console.log(zz);
         })
+
+    $(document).on('change', '.track-cb', function() {
+        var ip2 = this.getAttribute('data-ip');
+        if (!ip2) return;
+        var stored = [];
+        try { stored = JSON.parse(localStorage.getItem("tractor_tracks_show") || "[]"); } catch(e) {}
+        if (this.checked) {
+            if (stored.indexOf(ip2) === -1) stored.push(ip2);
+        } else {
+            stored = stored.filter(function(i) { return i !== ip2; });
+        }
+        try { localStorage.setItem("tractor_tracks_show", JSON.stringify(stored)); } catch(e) {}
+    });
 
        // ################" SOCKETS ##########################"
    
        function downloadURI(uri, name) {
             var link = document.createElement("a");
-            // If you don't know the name or want to use
-            // the webserver default set name = ''
             link.setAttribute('download', name);
             link.href = uri;
             document.body.appendChild(link);
@@ -143,13 +155,11 @@ $(document).ready(function () {
             link.remove();
             };
 
-        // server return the raw to rinex result
         socket.on('rinex ready', function(msg){
         response = JSON.parse(msg);
         console.log(response);
         if (response.result == "success") {           
             $('#create-rinex-button').html('Create Rinex file');
-            //location.href = "/logs/download/" + response.file;
             const SuccessTitleElt = document.createElement("h5");
             SuccessTitleElt.classList.add("text-success");
             SuccessTitleElt.textContent = "Success!";
@@ -161,8 +171,6 @@ $(document).ready(function () {
             SuccessElt.appendChild(document.createTextNode("Your Rinex file is ready "));
             var rinexDownBtnElt = document.createElement("a");
             rinexDownBtnElt.text = "Download it!";
-            //rinexDownBtnElt.href = "/logs/download/" + response.file;
-            //rinexDownBtnElt.target = "_blank";
             rinexDownBtnElt.setAttribute("title", "download rinex file");
             rinexDownBtnElt.classList.add("btn", "btn-primary");
             rinexDownBtnElt.id="download-rinex-btn";
@@ -170,7 +178,6 @@ $(document).ready(function () {
             SuccessElt.id = "success_msg";
             $('#rinex-conversion-msg').append(SuccessElt);
             rinexDownBtnElt.onclick = function (){
-                //Using this js function to download, because a <a href=.. disconnect socketio
                 var link = document.createElement("a");
                 link.setAttribute('download', '');
                 link.href = "/logs/download/" + response.file;

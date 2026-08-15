@@ -1,0 +1,808 @@
+import subprocess, json, os, re, math, tempfile, time
+from pathlib import Path
+
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data'))
+NDVI_DIR = os.path.join(DATA_DIR, 'ndvi')
+GPKG_PATH = os.path.join(DATA_DIR, 'tracks.gpkg')
+
+GDAL_ENV = os.environ.copy()
+GDAL_ENV['GDAL_SKIP'] = 'DODS'
+GDAL_ENV['CPL_VSIL_CURL_ALLOWED_EXTENSIONS'] = '.jp2,.tif'
+GDAL_ENV['OGR_CT_FORCE_TRADITIONAL_GIS_ORDER'] = 'YES'
+
+STAC_URL = 'https://planetarycomputer.microsoft.com/api/stac/v1/search'
+SAS_TOKEN_URL = 'https://planetarycomputer.microsoft.com/api/sas/v1/token/sentinel-2-l2a'
+
+_SAS_TOKEN_CACHE = {'token': None, 'expires': 0}
+
+def _get_sas_token():
+    now = time.time()
+    if _SAS_TOKEN_CACHE['token'] and now < _SAS_TOKEN_CACHE['expires'] - 60:
+        return _SAS_TOKEN_CACHE['token']
+    r = subprocess.run(['curl', '-s', '--connect-timeout', '10', '-m', '20', SAS_TOKEN_URL],
+        capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+        token = data.get('token', '')
+        if token:
+            expiry = data.get('msft:expiry', '')
+            if expiry:
+                try:
+                    _SAS_TOKEN_CACHE['expires'] = time.mktime(time.strptime(expiry, '%Y-%m-%dT%H:%M:%SZ'))
+                except:
+                    _SAS_TOKEN_CACHE['expires'] = now + 3000
+            _SAS_TOKEN_CACHE['token'] = token
+        return token
+    except:
+        return None
+
+os.makedirs(NDVI_DIR, exist_ok=True)
+
+def _stac_search(bbox, date_from=None, date_to=None, retries=2):
+    from datetime import datetime, timedelta
+    import time as _time
+    if date_from is None:
+        date_from = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+    if date_to is None:
+        date_to = datetime.now().strftime('%Y-%m-%d')
+    # STAC API expects [west, south, east, north] = [lon_min, lat_min, lon_max, lat_max]
+    pc_bbox = [bbox[0], bbox[1], bbox[2], bbox[3]]
+    body = {
+        'collections': ['sentinel-2-l2a'],
+        'bbox': pc_bbox,
+        'datetime': f'{date_from}T00:00:00Z/{date_to}T23:59:59Z',
+        'limit': 30,
+        'query': {'eo:cloud_cover': {'lt': 90}},
+        'fields': {'include': ['id', 'properties.datetime', 'properties.eo:cloud_cover', 'bbox', 'geometry', 'assets.B04.href', 'assets.B08.href', 'assets.SCL.href']},
+        'sortby': [{'field': 'properties.datetime', 'direction': 'desc'}]
+    }
+    for attempt in range(1 + retries):
+        r = subprocess.run(['curl', '-s', '--connect-timeout', '30', '-m', '300', '-X', 'POST', STAC_URL,
+            '-H', 'Content-Type: application/json', '-d', json.dumps(body)],
+            capture_output=True, text=True, timeout=360)
+        if r.returncode == 0:
+            break
+        if attempt < retries:
+            _time.sleep(5)
+    if r.returncode != 0:
+        return None
+    data = json.loads(r.stdout)
+    features = data.get('features', [])
+    if not features:
+        return None
+    results = []
+    for f in features:
+        props = f['properties']
+        scene_id = f['id']
+        assets = f.get('assets', {})
+        parts = scene_id.split('_')
+        # Planetary Computer: S2A_MSIL2A_20260524T074031_R092_T39UWQ_20260524T112011
+        tile_id = ''
+        for p in parts:
+            if p.startswith('T') and len(p) == 6:
+                tile_id = p[1:]
+                break
+        b04_url = assets.get('B04', {}).get('href', '')
+        b08_url = assets.get('B08', {}).get('href', '')
+        scl_url = assets.get('SCL', {}).get('href', '')
+        results.append({
+            'id': scene_id,
+            'tile': tile_id,
+            'cloud': props.get('eo:cloud_cover', 100),
+            'datetime': props.get('datetime', ''),
+            'b04_url': b04_url,
+            'b08_url': b08_url,
+            'scl_url': scl_url,
+        })
+    return results
+
+def _tile_to_aws_path(tile_id, year, month, day, sequence='0'):
+    if not tile_id or len(tile_id) != 5:
+        return None
+    utm = tile_id[:2]
+    lat = tile_id[2]
+    grid = tile_id[3:5]
+    month = str(int(month))
+    day = str(int(day))
+    return f'tiles/{utm}/{lat}/{grid}/{year}/{month}/{day}/{sequence}/R10m'
+
+def _find_best_tile_and_date(bbox, prefer_date=None):
+    results = _stac_search(bbox)
+    if not results:
+        return None, None, None, None
+    lon_center = (bbox[0] + bbox[2]) / 2
+    target_utm = int((lon_center + 180) / 6) + 1
+    results.sort(key=lambda r: r['datetime'] or '', reverse=True)
+    results.sort(key=lambda r: 0 if r['tile'][:2].lstrip('0') == str(target_utm) else 1)
+    if prefer_date:
+        date_results = [r for r in results if r.get('datetime', '').startswith(prefer_date)]
+        if date_results:
+            results = date_results + [r for r in results if not r.get('datetime', '').startswith(prefer_date)]
+    results = results[:10]
+    token = _get_sas_token()
+    token_suffix = f'?{token}' if token else ''
+    base_aws = 'https://sentinel-s2-l2a.s3.amazonaws.com'
+    candidates = []
+    for result in results:
+        sd = result.get('datetime', '')[:10]
+        parts = sd.split('-')
+        tile_id = result.get('tile', '')
+        if len(parts) == 3 and tile_id and len(tile_id) == 5:
+            aws_prefix = _tile_to_aws_path(tile_id, parts[0], parts[1], parts[2])
+            if aws_prefix:
+                candidates.append((
+                    f'{base_aws}/{aws_prefix}/B04.jp2',
+                    f'{base_aws}/{aws_prefix}/B08.jp2',
+                    f'{base_aws}/{aws_prefix.replace("R10m", "R20m")}/SCL.jp2',
+                    sd
+                ))
+        b04_pc = result.get('b04_url', '')
+        b08_pc = result.get('b08_url', '')
+        scl_pc = result.get('scl_url', '')
+        if b04_pc and b08_pc:
+            candidates.append((b04_pc + token_suffix, b08_pc + token_suffix, scl_pc + token_suffix if scl_pc else '', sd))
+    valid = []
+    for b04, b08, scl, sd in candidates:
+        ok = True
+        for url in [b04, b08]:
+            r = subprocess.run(['curl', '-so', '/dev/null', '-w', '%{http_code}', '--connect-timeout', '3', '-m', '5', url],
+                capture_output=True, text=True, timeout=10)
+            if r.stdout.strip() != '200':
+                ok = False
+                break
+        if ok:
+            valid.append((b04, b08, scl, sd))
+    return valid
+
+def _bbox_wgs84_to_utm(bounds_wgs84, utm_zone):
+    center_lat = (bounds_wgs84[1] + bounds_wgs84[3]) / 2
+    center_lon = (bounds_wgs84[0] + bounds_wgs84[2]) / 2
+    srs = f'EPSG:326{utm_zone}'
+    # Transform bbox from WGS84 to UTM using gdaltransform
+    coords = [
+        f'{bounds_wgs84[0]} {bounds_wgs84[1]}',
+        f'{bounds_wgs84[2]} {bounds_wgs84[1]}',
+        f'{bounds_wgs84[2]} {bounds_wgs84[3]}',
+        f'{bounds_wgs84[0]} {bounds_wgs84[3]}',
+    ]
+    xs, ys = [], []
+    for c in coords:
+        r = subprocess.run(['gdaltransform', '-s_srs', 'EPSG:4326', '-t_srs', srs],
+            input=c, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            parts = r.stdout.strip().split()
+            if len(parts) >= 2:
+                xs.append(float(parts[0]))
+                ys.append(float(parts[1]))
+    if not xs:
+        return None
+    margin = 100
+    return (min(xs) - margin, max(ys) + margin, max(xs) + margin, min(ys) - margin)
+
+def _utms_from_bounds(bounds_wgs84):
+    lon, lat = (bounds_wgs84[0] + bounds_wgs84[2]) / 2, (bounds_wgs84[1] + bounds_wgs84[3]) / 2
+    zone = int((lon + 180) / 6) + 1
+    return zone
+
+def _read_zone_from_gpkg(zone_id):
+    r = subprocess.run(['ogr2ogr', '-f', 'GeoJSON', '/vsistdout/',
+        GPKG_PATH, 'geozones', '-where', f"zone_id='{zone_id}'"],
+        capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        return None
+    data = json.loads(r.stdout)
+    feats = data.get('features', [])
+    if not feats:
+        return None
+    f = feats[0]
+    props = f['properties']
+    geom = f['geometry']
+    if geom['type'] != 'Polygon':
+        return None
+    # GeoJSON coords are [lon, lat] -> convert to [(lat, lon), ...]
+    polygon = [[p[1], p[0]] for p in geom['coordinates'][0]]
+    return {
+        'zone_id': props.get('zone_id', zone_id),
+        'name': props.get('name', ''),
+        'color': props.get('color', '#00ff00'),
+        'crop': props.get('crop', ''),
+        'planted_date': props.get('planted_date', ''),
+        'polygon': polygon,
+    }
+
+def _combine_rgba(rgb_path, alpha_path, out_path, cloud_mask_path=None):
+    from osgeo import gdal
+    import numpy as np
+    try:
+        rgb = gdal.Open(rgb_path)
+        alpha = gdal.Open(alpha_path)
+        if rgb is None or alpha is None:
+            return False
+        d = rgb.ReadAsArray()
+        a = alpha.ReadAsArray()
+        if len(d.shape) != 3 or d.shape[0] != 3:
+            return False
+        out = np.zeros((4, d.shape[1], d.shape[2]), dtype=np.uint8)
+        out[:3] = d
+        out[3] = np.where(a > 0, 255, 0).astype(np.uint8)
+        if cloud_mask_path:
+            cm_ds = gdal.Open(cloud_mask_path)
+            if cm_ds is not None:
+                cm = cm_ds.ReadAsArray()
+                if cm.shape == out.shape[1:]:
+                    inside = out[3] > 0
+                    cloudy = cm > 0
+                    mask = cloudy & inside
+                    out[0][mask] = 180
+                    out[1][mask] = 180
+                    out[2][mask] = 180
+                    out[3][mask] = 255
+
+        drv = gdal.GetDriverByName('GTiff')
+        ds = drv.Create(out_path, rgb.RasterXSize, rgb.RasterYSize, 4, gdal.GDT_Byte)
+        if ds is None:
+            return False
+        for i in range(4):
+            ds.GetRasterBand(i + 1).WriteArray(out[i])
+        ds.SetProjection(rgb.GetProjection())
+        ds.SetGeoTransform(rgb.GetGeoTransform())
+        ds = None
+        rgb = None
+        alpha = None
+        if cloud_mask_path:
+            cm_ds = None
+        return True
+    except Exception as e:
+        print(f"Combine RGBA error: {e}")
+        return False
+
+
+def calc_ndvi_for_zone(zone_id, prefer_date=None):
+    zone = _read_zone_from_gpkg(zone_id)
+    if not zone:
+        return {'error': f'Zone {zone_id} not found in GPKG'}
+    zone_name = zone['name']
+    polygon_wgs84 = zone['polygon']
+
+    bounds = [
+        min(p[1] for p in polygon_wgs84),
+        min(p[0] for p in polygon_wgs84),
+        max(p[1] for p in polygon_wgs84),
+        max(p[0] for p in polygon_wgs84),
+    ]
+    bbox_wgs84 = bounds
+    utm_zone = _utms_from_bounds(bbox_wgs84)
+    bbox_utm = _bbox_wgs84_to_utm(bbox_wgs84, utm_zone)
+    if not bbox_utm:
+        return {'error': 'Failed to compute UTM bbox'}
+
+    # Step 1: Get scene candidates from STAC, sorted by UTM match + date
+    raw_candidates = _stac_search(bbox_wgs84)
+    if not raw_candidates:
+        return {'error': 'No suitable Sentinel-2 scene found for this area'}
+
+    lon_center = (bbox_wgs84[0] + bbox_wgs84[2]) / 2
+    target_utm = int((lon_center + 180) / 6) + 1
+    raw_candidates.sort(key=lambda r: r['datetime'] or '', reverse=True)
+    raw_candidates.sort(key=lambda r: 0 if r['tile'][:2].lstrip('0') == str(target_utm) else 1)
+    if prefer_date:
+        date_results = [r for r in raw_candidates if r.get('datetime', '').startswith(prefer_date)]
+        if date_results:
+            raw_candidates = date_results + [r for r in raw_candidates if not r.get('datetime', '').startswith(prefer_date)]
+    raw_candidates = raw_candidates[:10]
+
+    zone_safe = re.sub(r'[^a-zA-Z0-9_-]', '_', zone_name)
+
+    def crop_band(url, out_path):
+        r = subprocess.run(['gdal_translate', '-projwin',
+            str(bbox_utm[0]), str(bbox_utm[1]),
+            str(bbox_utm[2]), str(bbox_utm[3]),
+            '-projwin_srs', f'EPSG:326{utm_zone}',
+            '-of', 'GTiff', url, out_path],
+            capture_output=True, text=True, timeout=180, env=GDAL_ENV)
+        return r.returncode == 0 and os.path.exists(out_path)
+
+    def _compute_cloud_pct(cloud_clipped):
+        info_r = subprocess.run(['gdalinfo', '-json', '-stats', cloud_clipped],
+            capture_output=True, text=True, timeout=30, env=GDAL_ENV)
+        if info_r.returncode == 0:
+            info = json.loads(info_r.stdout)
+            bands = info.get('bands', [])
+            if bands:
+                mean_val = bands[0].get('mean', 0)
+                return mean_val * 100
+        return None
+
+    def _url_exists(url):
+        r = subprocess.run(['curl', '-so', '/dev/null', '-w', '%{http_code}', '--connect-timeout', '3', '-m', '5', url],
+            capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() == '200'
+
+    # Build candidate URLs lazily
+    base_aws = 'https://sentinel-s2-l2a.s3.amazonaws.com'
+    token = _get_sas_token()
+    token_suffix = f'?{token}' if token else ''
+
+    def _build_candidates(results):
+        cands = []
+        for result in results:
+            sd = result.get('datetime', '')[:10]
+            parts = sd.split('-')
+            tile_id = result.get('tile', '')
+            if len(parts) == 3 and tile_id and len(tile_id) == 5:
+                aws_prefix = _tile_to_aws_path(tile_id, parts[0], parts[1], parts[2])
+                if aws_prefix:
+                    cands.append({
+                        'b04': f'{base_aws}/{aws_prefix}/B04.jp2',
+                        'b08': f'{base_aws}/{aws_prefix}/B08.jp2',
+                        'scl': f'{base_aws}/{aws_prefix.replace("R10m", "R20m")}/SCL.jp2',
+                        'date': sd,
+                    })
+            b04_pc = result.get('b04_url', '')
+            b08_pc = result.get('b08_url', '')
+            scl_pc = result.get('scl_url', '')
+            if b04_pc and b08_pc:
+                cands.append({
+                    'b04': b04_pc + token_suffix,
+                    'b08': b08_pc + token_suffix,
+                    'scl': scl_pc + token_suffix if scl_pc else '',
+                    'date': sd,
+                })
+        return cands
+
+    all_candidates = _build_candidates(raw_candidates)
+
+    selected = None
+    for attempt_idx, cand in enumerate(all_candidates):
+        scene_date = cand['date']
+        timestamp = f'{time.strftime("%Y%m%d_%H%M%S")}_{attempt_idx}'
+        base_name = f'ndvi_{zone_safe}_{timestamp}'
+
+        print(f'  Trying {scene_date}...')
+
+        # 1. Check SCL cloud cover FIRST (fast, 20m) before downloading B04/B08
+        cloud_mask = None
+        too_cloudy = False
+        scl_url = cand.get('scl', '')
+        if scl_url and _url_exists(scl_url):
+            scl_crop = os.path.join(NDVI_DIR, f'{base_name}_SCL.tif')
+            if crop_band(scl_url, scl_crop):
+                # Use SCL at native 20m for cloud check (no resample needed)
+                # Create binary cloud mask from SCL
+                cloud_mask_raw = os.path.join(NDVI_DIR, f'{base_name}_cloud.tif')
+                r_mask = subprocess.run(['gdal_calc.py', '-A', scl_crop,
+                    '--outfile', cloud_mask_raw, '--calc',
+                    '((A==8)|(A==9)|(A==10))*1',
+                    '--type', 'Byte', '--overwrite'],
+                    capture_output=True, text=True, timeout=60, env=GDAL_ENV)
+                if r_mask.returncode == 0 and os.path.exists(cloud_mask_raw):
+                    # Clip to zone polygon
+                    valid_cutline = os.path.join(NDVI_DIR, f'{base_name}_cutline.gpkg')
+                    subprocess.run(['ogr2ogr', '-f', 'GPKG', '-makevalid', '-nln', 'cutline',
+                        valid_cutline, GPKG_PATH, 'geozones', '-where', f"zone_id='{zone_id}'"],
+                        capture_output=True, text=True, timeout=30)
+
+                    cloud_clipped = os.path.join(NDVI_DIR, f'{base_name}_cloud_clip.tif')
+                    r_cc = subprocess.run(['gdalwarp', '-cutline', valid_cutline, '-crop_to_cutline',
+                        cloud_mask_raw, cloud_clipped],
+                        capture_output=True, text=True, timeout=60, env=GDAL_ENV)
+
+                    if r_cc.returncode == 0 and os.path.exists(cloud_clipped):
+                        cloud_pct = _compute_cloud_pct(cloud_clipped)
+                        if cloud_pct is not None and cloud_pct > 30:
+                            print(f'  {scene_date}: {cloud_pct:.1f}% clouds in zone > 30%, skipping')
+                            too_cloudy = True
+                            os.remove(cloud_clipped)
+                        else:
+                            cloud_mask = cloud_clipped
+                            print(f'  {scene_date}: {cloud_pct:.1f}% clouds in zone OK')
+                    if os.path.exists(valid_cutline): os.remove(valid_cutline)
+                if os.path.exists(cloud_mask_raw) and (too_cloudy or cloud_mask != cloud_mask_raw):
+                    os.remove(cloud_mask_raw)
+                os.remove(scl_crop)
+
+            if too_cloudy:
+                continue
+
+        # 2. Cloud check passed (or SCL unavailable) — verify and download B04/B08
+        if not _url_exists(cand['b04']) or not _url_exists(cand['b08']):
+            print(f'  {scene_date}: band URLs not accessible, trying next')
+            continue
+
+        b04_crop = os.path.join(NDVI_DIR, f'{base_name}_B04.tif')
+        b08_crop = os.path.join(NDVI_DIR, f'{base_name}_B08.tif')
+
+        if not crop_band(cand['b04'], b04_crop) or not crop_band(cand['b08'], b08_crop):
+            for f in [b04_crop, b08_crop]:
+                if os.path.exists(f): os.remove(f)
+            print(f'  {scene_date}: band download failed, trying next')
+            continue
+
+        selected = (base_name, b04_crop, b08_crop, cloud_mask, scene_date)
+        print(f'  Selected scene: {scene_date}')
+        break
+
+    if not selected:
+        return {'error': 'All candidates had > 30% cloud cover within the zone, or bands unavailable'}
+
+    base_name, b04_crop, b08_crop, cloud_mask, scene_date = selected
+    
+    # Resample cloud mask to 10m if we have one (for later overlay with NDVI)
+    if cloud_mask and os.path.exists(cloud_mask):
+        cloud_10m = os.path.join(NDVI_DIR, f'{base_name}_cloud_10m.tif')
+        r_resample = subprocess.run(['gdalwarp', '-tr', '10', '10', '-r', 'near',
+            cloud_mask, cloud_10m],
+            capture_output=True, text=True, timeout=60, env=GDAL_ENV)
+        if r_resample.returncode == 0 and os.path.exists(cloud_10m):
+            os.remove(cloud_mask)
+            cloud_mask = cloud_10m
+
+    # 2. Calculate NDVI
+    ndvi_raw = os.path.join(NDVI_DIR, f'{base_name}_raw.tif')
+    calc_cmd = ['gdal_calc.py', '-A', b04_crop, '-B', b08_crop,
+        '--outfile', ndvi_raw, '--calc', '(B.astype(float)-A.astype(float))/(B.astype(float)+A.astype(float)+1e-10)',
+        '--NoDataValue', '-9999', '--type', 'Float32', '--overwrite']
+    r = subprocess.run(calc_cmd, capture_output=True, text=True, timeout=300, env=GDAL_ENV)
+    if r.returncode != 0 or not os.path.exists(ndvi_raw):
+        for f in [b04_crop, b08_crop, ndvi_raw]:
+            if os.path.exists(f): os.remove(f)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': f'gdal_calc failed: {r.stderr[:200]}'}
+
+    for f in [b04_crop, b08_crop]:
+        os.remove(f)
+
+    # 3. Clip to polygon using GPKG layer directly, with makevalid
+    ndvi_clipped = os.path.join(NDVI_DIR, f'{base_name}.tif')
+    # First make the cutline valid using ogr2ogr
+    valid_cutline = os.path.join(NDVI_DIR, f'{base_name}_cutline.gpkg')
+    subprocess.run(['ogr2ogr', '-f', 'GPKG', '-makevalid', '-nln', 'cutline',
+        valid_cutline, GPKG_PATH, 'geozones', '-where', f"zone_id='{zone_id}'"],
+        capture_output=True, text=True, timeout=30)
+    warp_cmd = ['gdalwarp', '-cutline', valid_cutline, '-crop_to_cutline',
+        '-dstalpha', '-of', 'GTiff', ndvi_raw, ndvi_clipped]
+    r = subprocess.run(warp_cmd, capture_output=True, text=True, timeout=120, env=GDAL_ENV)
+
+    # Also clip cloud mask to the same boundary while cutline exists
+    if cloud_mask and r.returncode == 0:
+        cloud_clipped = os.path.join(NDVI_DIR, f'{base_name}_cloud_clip.tif')
+        r_c = subprocess.run(['gdalwarp', '-cutline', valid_cutline, '-crop_to_cutline',
+            cloud_mask, cloud_clipped],
+            capture_output=True, text=True, timeout=60, env=GDAL_ENV)
+        if r_c.returncode == 0 and os.path.exists(cloud_clipped):
+            os.remove(cloud_mask)
+            cloud_mask = cloud_clipped
+        else:
+            if os.path.exists(cloud_clipped): os.remove(cloud_clipped)
+
+    if os.path.exists(valid_cutline):
+        os.remove(valid_cutline)
+    if r.returncode != 0 or not os.path.exists(ndvi_clipped):
+        if os.path.exists(ndvi_clipped):
+            os.remove(ndvi_clipped)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': f'gdalwarp failed: {r.stderr[:200]}'}
+    os.remove(ndvi_raw)
+
+    # 4. Get NDVI stats from the clipped raw NDVI (before colorizing)
+    info_r = subprocess.run(['gdalinfo', '-json', '-stats', ndvi_clipped],
+        capture_output=True, text=True, timeout=30, env=GDAL_ENV)
+    stats = {}
+    if info_r.returncode == 0:
+        info = json.loads(info_r.stdout)
+        bands = info.get('bands', [])
+        if bands:
+            b0 = bands[0]
+            stats['min'] = b0.get('minimum', -1)
+            stats['max'] = b0.get('maximum', 1)
+            stats['mean'] = b0.get('mean', 0)
+
+    # Reject scenes with all-zero NDVI (cloudy or wrong tile)
+    if stats.get('mean', 0) == 0 and stats.get('max', 0) == 0:
+        for f in [ndvi_clipped, ndvi_raw]:
+            if os.path.exists(f): os.remove(f)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': 'All NDVI values are zero — scene likely cloudy or outside zone bounds'}
+
+    # 5. Extract NDVI band for colorization
+    ndvi_band = os.path.join(NDVI_DIR, f'{base_name}_b1.tif')
+    r1 = subprocess.run(['gdal_translate', '-b', '1', ndvi_clipped, ndvi_band],
+        capture_output=True, timeout=30, env=GDAL_ENV)
+
+    # 6. Colorize NDVI (without -alpha, output is 3-band RGB)
+    color_file = os.path.join(NDVI_DIR, f'{base_name}_color.txt')
+    ndvi_rgb = os.path.join(NDVI_DIR, f'{base_name}_rgb.tif')
+    with open(color_file, 'w') as f:
+        f.write('-1 184 54 10 255\n')
+        f.write('0 184 54 10 255\n')
+        f.write('0.1 184 54 10 255\n')
+        f.write('0.2 245 139 45 255\n')
+        f.write('0.3 255 232 34 255\n')
+        f.write('0.4 213 247 33 255\n')
+        f.write('0.5 129 232 40 255\n')
+        f.write('0.6 61 202 41 255\n')
+        f.write('0.7 38 125 27 255\n')
+        f.write('0.8 25 83 18 255\n')
+        f.write('0.9 16 49 13 255\n')
+        f.write('1 16 49 13 255\n')
+
+    r2 = subprocess.run(['gdaldem', 'color-relief', ndvi_band, color_file, ndvi_rgb],
+        capture_output=True, text=True, timeout=60, env=GDAL_ENV)
+    os.remove(color_file)
+    if r2.returncode != 0 or not os.path.exists(ndvi_rgb):
+        for f in [ndvi_clipped, ndvi_band]:
+            if os.path.exists(f): os.remove(f)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': f'gdaldem color-relief failed: {r2.stderr[:200]}'}
+    os.remove(ndvi_band)
+
+    # 7. Extract alpha mask from clipped raster
+    ndvi_alpha = os.path.join(NDVI_DIR, f'{base_name}_alpha.tif')
+    r3 = subprocess.run(['gdal_translate', '-b', '2', ndvi_clipped, ndvi_alpha],
+        capture_output=True, timeout=30, env=GDAL_ENV)
+    if r3.returncode != 0 or not os.path.exists(ndvi_alpha):
+        for f in [ndvi_clipped, ndvi_rgb]:
+            if os.path.exists(f): os.remove(f)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': 'Failed to extract alpha band'}
+    os.remove(ndvi_clipped)
+
+    # 8. Combine RGB + alpha into final RGBA
+    final_tif = os.path.join(NDVI_DIR, f'{base_name}_color.tif')
+    if not _combine_rgba(ndvi_rgb, ndvi_alpha, final_tif, cloud_mask):
+        for f in [ndvi_rgb, ndvi_alpha]:
+            if os.path.exists(f): os.remove(f)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': 'Failed to combine RGB + alpha into final NDVI'}
+    if cloud_mask and os.path.exists(cloud_mask):
+        os.remove(cloud_mask)
+    os.remove(ndvi_rgb)
+    os.remove(ndvi_alpha)
+
+    # 9. Add overviews
+    subprocess.run(['gdaladdo', '-r', 'average', final_tif, '2', '4', '8', '16'],
+        capture_output=True, timeout=60, env=GDAL_ENV)
+
+    # 7. Store metadata
+    ndvi_scenes = {
+        'zone_id': zone_id,
+        'zone_name': zone_name,
+        'file_path': final_tif,
+        'scene_date': scene_date,
+        'min_ndvi': stats.get('min', 0),
+        'max_ndvi': stats.get('max', 0),
+        'mean_ndvi': stats.get('mean', 0),
+    }
+    _store_metadata(ndvi_scenes)
+    if os.path.exists(final_tif):
+        os.remove(final_tif)
+    return ndvi_scenes
+
+def _store_metadata(scene):
+    import sqlite3
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        conn.execute('PRAGMA journal_mode=WAL')
+        # Create v2 table with composite unique
+        conn.execute('CREATE TABLE IF NOT EXISTS ndvi_scenes_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, zone_id TEXT, zone_name TEXT, file_path TEXT, scene_date TEXT, min_ndvi REAL, max_ndvi REAL, mean_ndvi REAL, raster_data BLOB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(zone_id, scene_date))')
+        # Keep v1 table for backward compat
+        conn.execute('CREATE TABLE IF NOT EXISTS ndvi_scenes (zone_id TEXT PRIMARY KEY, zone_name TEXT, file_path TEXT, scene_date TEXT, min_ndvi REAL, max_ndvi REAL, mean_ndvi REAL, raster_data BLOB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
+        cols = [c[1] for c in conn.execute('PRAGMA table_info(ndvi_scenes)').fetchall()]
+        if 'raster_data' not in cols:
+            conn.execute('ALTER TABLE ndvi_scenes ADD COLUMN raster_data BLOB')
+        raster_data = None
+        fp = scene.get('file_path', '')
+        if fp and os.path.exists(fp):
+            with open(fp, 'rb') as f:
+                raster_data = f.read()
+        blob = sqlite3.Binary(raster_data) if raster_data else None
+        # Store in v2 (multi-date)
+        conn.execute('INSERT OR REPLACE INTO ndvi_scenes_v2 (zone_id, zone_name, file_path, scene_date, min_ndvi, max_ndvi, mean_ndvi, raster_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (scene['zone_id'], scene['zone_name'], scene['file_path'], scene['scene_date'], scene['min_ndvi'], scene['max_ndvi'], scene['mean_ndvi'], blob))
+        # Store in v1 (latest per zone)
+        conn.execute('INSERT OR REPLACE INTO ndvi_scenes (zone_id, zone_name, file_path, scene_date, min_ndvi, max_ndvi, mean_ndvi, raster_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (scene['zone_id'], scene['zone_name'], scene['file_path'], scene['scene_date'], scene['min_ndvi'], scene['max_ndvi'], scene['mean_ndvi'], blob))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f'GPKG metadata error: {e}')
+
+def get_ndvi_layers():
+    import sqlite3
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute('''
+            SELECT s.zone_id, s.zone_name, s.scene_date, s.min_ndvi, s.max_ndvi, s.mean_ndvi, s.created_at
+            FROM ndvi_scenes_v2 s
+            WHERE s.zone_id IN (SELECT zone_id FROM geozones)
+            ORDER BY s.zone_id, s.scene_date DESC
+        ''').fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+def get_ndvi_overlay(zone_id, scene_date=None):
+    import sqlite3
+    import tempfile
+    cleanup_paths = []
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        if scene_date:
+            row = conn.execute('SELECT file_path, raster_data FROM ndvi_scenes_v2 WHERE zone_id=? AND scene_date=?', (zone_id, scene_date)).fetchone()
+        else:
+            row = conn.execute('SELECT file_path, raster_data FROM ndvi_scenes_v2 WHERE zone_id=? ORDER BY scene_date DESC LIMIT 1', (zone_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None, None
+        tif_path = row[0]
+        raster_data = row[1]
+        if raster_data:
+            tmp = tempfile.NamedTemporaryFile(suffix='.tif', delete=False)
+            tmp.write(raster_data)
+            tmp.close()
+            tif_path = tmp.name
+            cleanup_paths.append(tif_path)
+        elif not os.path.exists(tif_path):
+            return None, None
+    except Exception:
+        return None, None
+
+    # Get bounds in EPSG:4326 by reprojecting corners
+    info_r = subprocess.run(['gdalinfo', '-json', tif_path],
+        capture_output=True, text=True, timeout=10, env=GDAL_ENV)
+    if info_r.returncode != 0:
+        return None, None
+    info = json.loads(info_r.stdout)
+    corners = info.get('cornerCoordinates', {})
+    ll = corners.get('lowerLeft', [])
+    ur = corners.get('upperRight', [])
+    if len(ll) < 2 or len(ur) < 2:
+        return None, None
+
+    # Reproject corners from UTM to WGS84 using gdaltransform
+    srs = info.get('coordinateSystem', {}).get('wkt', '')
+    import re
+    matches = re.findall(r'(?:AUTHORITY|ID)\["EPSG",?"?(\d+)"?\]', srs or '')
+    epsg = matches[-1] if matches else '32639'
+    corners_utm = [f"{ll[0]} {ll[1]}", f"{ur[0]} {ll[1]}",
+                   f"{ur[0]} {ur[1]}", f"{ll[0]} {ur[1]}"]
+    lons, lats = [], []
+    for pt in corners_utm:
+        r = subprocess.run(['gdaltransform', '-s_srs', f'EPSG:{epsg}', '-t_srs', 'EPSG:4326'],
+            input=pt, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            parts = r.stdout.strip().split()
+            if len(parts) >= 2:
+                lons.append(float(parts[0]))
+                lats.append(float(parts[1]))
+    if not lons:
+        for p in cleanup_paths:
+            try: os.remove(p)
+            except: pass
+        return None, None
+    bbox_wgs84 = [min(lons), min(lats), max(lons), max(lats)]
+
+    # Convert to PNG
+    out_png = os.path.join(tempfile.gettempdir(), f'ndvi_{zone_id}.png')
+    r = subprocess.run(['gdal_translate', '-of', 'PNG', tif_path, out_png],
+        capture_output=True, timeout=30, env=GDAL_ENV)
+    if r.returncode != 0 or not os.path.exists(out_png):
+        for p in cleanup_paths:
+            try: os.remove(p)
+            except: pass
+        return None, None
+    with open(out_png, 'rb') as f:
+        png_bytes = f.read()
+    os.remove(out_png)
+    for p in cleanup_paths:
+        try: os.remove(p)
+        except: pass
+    return png_bytes, bbox_wgs84
+
+def serve_ndvi_tile(zone_id, z, x, y):
+    import sqlite3
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        row = conn.execute('SELECT file_path FROM ndvi_scenes WHERE zone_id=?', (zone_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        tif_path = row[0]
+        if not os.path.exists(tif_path):
+            return None
+    except Exception:
+        return None
+
+    # Use gdal2tiles-like approach: just serve the GeoTIFF as PNG for the requested bbox
+    # For Leaflet, we need XYZ tiles. Use gdal_translate to extract the tile.
+    # Actually, simpler: convert the GeoTIFF to tiles using gdal2tiles.py, or use
+    # a tile server approach. For now, serve the GeoTIFF as an L.imageOverlay.
+
+    # We'll implement a WMTS-like tile server using gdal_translate + projwin
+    # Convert tile x,y,z to bbox in EPSG:3857
+    n = 2.0 ** z
+    tile_size = 256
+    left = x / n * 360.0 - 180.0
+    right = (x + 1) / n * 360.0 - 180.0
+    top = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
+    bottom = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
+
+    out_png = os.path.join(tempfile.gettempdir(), f'ndvi_tile_{zone_id}_{z}_{x}_{y}.png')
+    try:
+        r = subprocess.run(['gdal_translate', '-of', 'PNG', '-projwin_srs', 'EPSG:4326',
+            '-projwin', str(left), str(top), str(right), str(bottom),
+            '-outsize', str(tile_size), str(tile_size),
+            '-scale', tif_path, out_png],
+            capture_output=True, text=True, timeout=30, env=GDAL_ENV)
+        if r.returncode == 0 and os.path.exists(out_png):
+            return out_png
+    except Exception:
+        pass
+    return None
+
+
+def get_ndvi_dates(zone_id=None):
+    import sqlite3
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        conn.row_factory = sqlite3.Row
+        if zone_id:
+            rows = conn.execute('SELECT DISTINCT scene_date FROM ndvi_scenes_v2 WHERE zone_id=? ORDER BY scene_date DESC', (zone_id,)).fetchall()
+        else:
+            rows = conn.execute('''
+                SELECT s.zone_id, s.scene_date
+                FROM ndvi_scenes_v2 s
+                WHERE s.zone_id IN (SELECT zone_id FROM geozones)
+                ORDER BY s.zone_id, s.scene_date DESC
+            ''').fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def recalc_all_ndvi():
+    import sqlite3
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        zones = [r[0] for r in conn.execute('SELECT zone_id FROM geozones').fetchall()]
+        conn.close()
+    except Exception as e:
+        print(f"recalc_all_ndvi: failed to list zones: {e}")
+        return {}
+    results = {}
+    for zid in zones:
+        try:
+            result = calc_ndvi_for_zone(zid)
+            results[zid] = result.get("zone_id") is not None
+        except Exception as e:
+            print(f"recalc_all_ndvi: {zid} failed: {e}")
+            results[zid] = False
+    return results
+
+def get_ndvi_geotiff(zone_id, scene_date=None):
+    """Return (tif_bytes, filename) for the NDVI GeoTIFF of a zone."""
+    import sqlite3, tempfile
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        if scene_date:
+            row = conn.execute('SELECT file_path, raster_data FROM ndvi_scenes_v2 WHERE zone_id=? AND scene_date=?', (zone_id, scene_date)).fetchone()
+        else:
+            row = conn.execute('SELECT file_path, raster_data FROM ndvi_scenes_v2 WHERE zone_id=? ORDER BY scene_date DESC LIMIT 1', (zone_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None, None
+        tif_path = row[0]
+        raster_data = row[1]
+        if raster_data:
+            return raster_data, f"ndvi_{zone_id}.tif"
+        elif tif_path and os.path.exists(tif_path):
+            with open(tif_path, 'rb') as f:
+                return f.read(), os.path.basename(tif_path)
+        return None, None
+    except Exception:
+        return None, None

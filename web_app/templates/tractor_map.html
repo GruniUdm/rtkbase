@@ -1,0 +1,431 @@
+{% extends 'base.html' %}
+
+{% block styles %}
+{{super()}}
+<link rel="stylesheet" href="{{ url_for('static', filename='lib/leaflet-1.7.css') }}">
+<style>
+    #map { height: calc(100vh - 160px); min-height: 400px; }
+    .sidebar-card { margin-bottom: 12px; }
+    .sidebar-card .card-header {
+        padding: 8px 12px;
+        font-size: 0.95em;
+        font-weight: 600;
+        cursor: pointer;
+        user-select: none;
+    }
+    .sidebar-card .card-header .collapse-icon {
+        float: right;
+        transition: transform 0.2s;
+    }
+    .sidebar-card .card-header .collapse-icon.collapsed {
+        transform: rotate(-90deg);
+    }
+    .sidebar-card .card-body { padding: 4px; }
+    .tractor-list, .geozone-list { max-height: 200px; overflow-y: auto; }
+    .tractor-item, .geozone-item { cursor: pointer; padding: 5px 8px; border-bottom: 1px solid #eee; font-size: 0.9em; }
+    .tractor-item:hover, .geozone-item:hover { background-color: #f0f0f0; }
+    .geozone-item.active-zone { background-color: #d4edda; font-weight: 600; }
+    .offline { opacity: 0.5; }
+    .badge-online { background-color: #28a745; color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; }
+    .badge-offline { background-color: #6c757d; color: #fff; padding: 1px 5px; border-radius: 3px; font-size: 0.75em; }
+    .geozone-color-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+    .geozone-del { float: right; color: #dc3545; cursor: pointer; font-weight: bold; padding: 0 4px; }
+    .geozone-del:hover { color: #a71d2a; }
+    .draw-btn { width: 100%; margin-top: 4px; }
+    .draw-active { background-color: #e74c3c !important; border-color: #c0392b !important; color: #fff !important; }
+    .draw-info { font-size: 0.85em; color: #e74c3c; padding: 4px 8px; display: none; }
+    .ab-point-label { font-size: 11px; font-weight: bold; background: rgba(231,76,60,0.8); color: #fff; border: none; padding: 2px 5px; }
+
+    .wh-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .wh-card { flex: 1 1 150px; background: #f8f9fa; border: 1px solid #e3e6ea; border-radius: 6px; padding: 8px 10px; }
+    .wh-card .wh-label { font-size: 0.75em; color: #888; }
+    .wh-card .wh-value { font-size: 1.3em; font-weight: 600; }
+    .wh-card .wh-sub { font-size: 0.75em; color: #888; }
+    .wh-barchart { display: flex; align-items: flex-end; gap: 6px; height: 160px; padding: 8px 4px 0; border-bottom: 1px solid #ddd; }
+    .wh-bar-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+    .wh-bar { width: 70%; background: #2980b9; border-radius: 3px 3px 0 0; min-height: 2px; }
+    .wh-bar-val { font-size: 0.7em; color: #555; }
+    .wh-bar-temp { font-size: 0.7em; color: #888; }
+    .wh-bar-month { font-size: 0.75em; color: #666; margin-top: 2px; }
+
+    .tractor-item { cursor: default; padding: 4px 0; border-bottom: 1px solid #ddd; }
+    .tractor-item .tractor-header { cursor: pointer; }
+    .tractor-item .tractor-header:hover { background: #f5f5f5; }
+    .tractor-item.offline { opacity: 0.6; }
+    .tractor-item .expand-icon { cursor: pointer; float: right; font-size: 0.8em; }
+    .tractor-sessions { background: #f9f9f9; border-radius: 4px; margin: 2px 0; }
+    .tractor-sessions .btn { line-height: 1.2; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="d-flex align-items-center mt-3 mb-3">
+        <h3 class="mb-0 mr-3">Tractor Map</h3>
+    </div>
+    <div class="row">
+        <div class="col-md-3" id="leftPanel">
+            <div class="card sidebar-card">
+                <div class="card-header" onclick="$('#tractorList').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Connected Tractors <span class="collapse-icon">▼</span>
+                </div>
+                <div class="card-body tractor-list" id="tractorList">
+                    <div class="text-muted" style="padding:8px;">No data</div>
+                </div>
+            </div>
+            <div class="card sidebar-card">
+                <div class="card-header" onclick="$('#geozoneBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Geozones <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="geozoneBody" style="display:none;">
+                    <div class="geozone-list" id="geozoneList">
+                        <div class="text-muted" style="padding:8px;">No geozones</div>
+                    </div>
+                    <div class="draw-info" id="drawInfo">Click on map to add points. Double-click or click Save to finish.</div>
+                    <button class="btn btn-sm btn-secondary draw-btn" id="drawBtn">Draw Geozone</button>
+                    <button class="btn btn-sm btn-success draw-btn" id="saveGeozoneBtn" style="display:none;">Save Geozone</button>
+                    <button class="btn btn-sm btn-success draw-btn" id="savePointsBtn" style="display:none;">Save Points</button>
+                    <button class="btn btn-sm btn-danger draw-btn" id="cancelPointsBtn" style="display:none;">Cancel</button>
+                    <button class="btn btn-sm btn-outline-secondary draw-btn" id="importKmlBtn">Import KML</button>
+                    <input type="file" id="kmlFileInput" accept=".kml" style="display:none">
+                    <hr>
+                    <div id="taskPlannerSection" style="display:none;">
+                        <div class="font-weight-bold small mb-1">Task Planner</div>
+                        <input type="hidden" id="plannerZoneId">
+                        <div class="form-group mb-1">
+                          <input type="text" class="form-control form-control-sm" id="plannerTaskName" placeholder="Task name" value="Coverage Task">
+                        </div>
+                        <div class="form-row">
+                          <div class="col-4 mb-1">
+                            <input type="number" class="form-control form-control-sm" id="plannerSwathWidth" value="10" min="1" step="0.5" placeholder="Swath m">
+                          </div>
+                          <div class="col-4 mb-1">
+                            <input type="number" class="form-control form-control-sm" id="plannerTurningRadius" min="0" step="0.5" placeholder="Turn R (auto)">
+                          </div>
+                          <div class="col-4 mb-1">
+                            <input type="number" class="form-control form-control-sm" id="plannerAngle" value="0" min="0" max="180" step="1" placeholder="Angle deg">
+                            <small class="text-muted" style="font-size:0.75em;">0=N, 90=E</small>
+                          </div>
+                        </div>
+                        <div class="form-row">
+                          <div class="col-6 mb-1">
+                            <input type="number" class="form-control form-control-sm" id="plannerBoundaryOffset" value="0" min="0" step="0.5" placeholder="Boundary offset m">
+                          </div>
+                          <div class="col-6 mb-1 d-flex align-items-center">
+                            <div class="form-check">
+                              <input type="checkbox" class="form-check-input" id="plannerBoundaryPass">
+                              <label class="form-check-label small" for="plannerBoundaryPass">Boundary pass</label>
+                            </div>
+                          </div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-info btn-block" id="plannerPickBtn">Pick 2 Points on Map</button>
+                        <div id="plannerPickInfo" style="font-size:0.85em;color:#e67e22;padding:2px 0;display:none;"></div>
+                        <button class="btn btn-sm btn-success btn-block" id="plannerGenerateBtn">Generate</button>
+                        <div id="plannerInfo" style="display:none;font-size:0.85em;padding:4px 0;"></div>
+                        <button class="btn btn-sm btn-primary btn-block" id="plannerSaveBtn" style="display:none;">Save Task</button>
+                        <button class="btn btn-sm btn-outline-danger btn-block" id="plannerCloseBtn">Close Planner</button>
+                        <div id="plannerSavedTasks" style="font-size:0.85em;margin-top:4px;"></div>
+                    </div>
+
+                </div>
+            </div>
+            
+            <div class="card sidebar-card">
+                <div class="card-header" onclick="toggleAlertsPanel(this);">
+                    Обработка <span class="badge badge-danger" id="alertsBadge" style="display:none;"></span> <span class="collapse-icon collapsed">&#9660;</span>
+                </div>
+                <div class="card-body" id="alertsBody" style="display:none;">
+                    <button class="btn btn-sm btn-outline-info btn-block" onclick="scanAlerts()">Проверить движение</button>
+                    <div id="alertsList" style="margin-top:6px;font-size:0.85em;"><span class="text-muted">Список пуст</span></div>
+                </div>
+            </div>
+
+            
+<div class="card sidebar-card">
+                <div class="card-header" onclick="$('#fieldFilesBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Файлы полей <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="fieldFilesBody" style="display:none;">
+                    <div id="fieldFileList" style="max-height:300px;overflow-y:auto;">
+                        <span class="text-muted" style="padding:4px;font-size:0.85em;">Загрузка...</span>
+                    </div>
+                    <div id="fieldFileMenu" class="dropdown-menu" style="display:none;z-index:1000;font-size:0.85em;">
+                        <a class="dropdown-item" href="#" id="menuCopyFile">Копировать файл</a>
+                        <a class="dropdown-item" href="#" id="menuRenameFile">Переименовать файл</a>
+                        <a class="dropdown-item" href="#" id="menuDeleteFile">Удалить файл</a>
+                        <div class="dropdown-divider"></div>
+                        <a class="dropdown-item" href="#" id="menuShowField">Показать на карте</a>
+                        <a class="dropdown-item" href="#" id="menuConvertField">Конвертировать в зону</a>
+                        <div class="dropdown-divider"></div>
+                        <a class="dropdown-item" href="#" id="menuCopyElement">Копировать элемент</a>
+                        <a class="dropdown-item" href="#" id="menuRenameElement">Переименовать элемент</a>
+                        <a class="dropdown-item" href="#" id="menuDeleteElement">Удалить элемент</a>
+                        <div class="dropdown-divider"></div>
+                        <a class="dropdown-item" href="#" id="menuExportField">Скачать (JSON)</a>
+                    </div>
+                </div>
+            </div>
+            <div class="card sidebar-card">
+                <div class="card-header" onclick="toggleNdviPanel(this);">
+                    NDVI Calendar <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="ndviBody" style="display:none;">
+                    <div id="ndviCalendarDates" style="min-height:180px;">
+                        <span class="text-muted" style="padding:4px;font-size:0.85em;">Loading...</span>
+                    </div>
+                    <button class="btn btn-sm btn-success btn-block" id="ndviShowCalendarBtn" style="display:none;">Show NDVI</button>
+                    <button class="btn btn-sm btn-outline-danger btn-block" id="ndviHideCalendarBtn" style="display:none;">Hide NDVI</button>
+                </div>
+            </div>
+            <div class="card sidebar-card">
+                <div class="card-header" onclick="toggleWeatherPanel(this);">
+                    Weather <span class="collapse-icon collapsed">&#9660;</span>
+                </div>
+                <div class="card-body" id="weatherBody" style="display:none;">
+                    <div id="weatherContent" style="min-height:40px;font-size:0.85em;">
+                        <span class="text-muted">Loading...</span>
+                    </div>
+                    <div id="diseaseRisk" style="margin-top:8px;border-top:1px solid #ddd;padding-top:6px;font-size:0.82em;display:none;">
+                        <div style="font-weight:600;margin-bottom:4px;">Болезни картофеля</div>
+                        <div style="display:flex;gap:4px;align-items:center;margin-bottom:4px;">
+                            <select id="growthStage" style="flex:1;font-size:0.85em;padding:2px 4px;border:1px solid #ccc;border-radius:3px;">
+                                <option value="early">До смыкания ботвы</option>
+                                <option value="mid">Смыкание — бутонизация</option>
+                                <option value="late">Цветение — рост клубней</option>
+                            </select>
+                        </div>
+                        <div id="phytoRisk" style="margin:2px 0;"><span style="color:#888;">Фитофтороз:</span> <span class="risk-val">--</span></div>
+                        <div id="altRisk" style="margin:2px 0;"><span style="color:#888;">Альтернариоз:</span> <span class="risk-val">--</span></div>
+                        <div id="riskRec" style="margin:4px 0 2px;font-weight:500;font-size:0.9em;">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-9" style="position:relative;">
+            <div id="map"></div>
+            <div id="weatherHistoryPanel" style="display:none;height:calc(100vh - 160px);min-height:400px;overflow-y:auto;padding:8px;">
+                <div style="font-weight:600;margin-bottom:6px;">История погоды · Новая Бия</div>
+                <div id="weatherHistoryContent">
+                    <span class="text-muted">Загрузка истории...</span>
+                </div>
+                <div id="whTooltip" style="display:none;position:fixed;z-index:3000;background:rgba(40,40,40,0.92);color:#fff;font-size:0.78em;padding:4px 8px;border-radius:4px;pointer-events:none;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.3);"></div>
+            </div>
+            <div id="geozonePanel" style="display:none;height:calc(100vh - 160px);min-height:400px;overflow-y:auto;padding:8px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:4px;">
+                    <div style="font-weight:600;font-size:1.05em;">
+                        <span id="gpColorDot" style="display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:middle;"></span>
+                        <span id="gpName"></span>
+                    </div>
+                    <div>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="gpShowOnMap()">На карте</button>
+                        <button class="btn btn-sm btn-outline-warning" onclick="startEditPoints()">Править точки</button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="gpDelete()">Удалить</button>
+                        <button class="btn btn-sm btn-secondary" onclick="closeGeozonePanel()">Закрыть</button>
+                    </div>
+                </div>
+                <div style="color:#666;font-size:0.85em;margin-bottom:10px;">
+                    Площадь: <b id="gpArea"></b> га &middot; Периметр: <b id="gpPerimeter"></b> м
+                    <span id="gpCropBadge" class="badge" style="margin-left:6px;display:none;"></span>
+                </div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+                    <div id="geozoneMiniMap" style="width:280px;height:280px;border:1px solid #ddd;border-radius:4px;flex:0 0 auto;"></div>
+                    <div class="card sidebar-card" style="flex:1 1 240px;">
+                        <div class="card-header">Поле</div>
+                        <div class="card-body">
+                            <div class="form-group">
+                                <label>Название</label>
+                                <input type="text" class="form-control" id="editZoneName">
+                            </div>
+                            <div class="form-group">
+                                <label>Культура</label>
+                                <input type="text" class="form-control" id="editZoneCrop" placeholder="e.g. Wheat, Corn, Sunflower">
+                            </div>
+                            <div class="form-row">
+                                <div class="col-6">
+                                    <div class="form-group">
+                                        <label>Дата посева</label>
+                                        <input type="date" class="form-control" id="editZonePlanted">
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="form-group">
+                                        <label>Посл. хим. обработка</label>
+                                        <input type="date" class="form-control" id="editZoneChemDate">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>Препарат</label>
+                                <input type="text" class="form-control" id="editZoneChemName" placeholder="e.g. Glyphosate, 2,4-D">
+                            </div>
+                            <button class="btn btn-sm btn-primary" onclick="saveEditZone()">Сохранить</button>
+                            <span id="gpSaveMsg" style="font-size:0.85em;color:green;margin-left:6px;"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card sidebar-card">
+                    <div class="card-header">Урожайность</div>
+                    <div class="card-body">
+                        <div id="yieldSummary" class="text-muted">—</div>
+                    </div>
+                </div>
+
+                <div class="card sidebar-card">
+                    <div class="card-header" onclick="$('#gpNdviBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                        NDVI <span class="collapse-icon collapsed">&#9660;</span>
+                    </div>
+                    <div class="card-body" id="gpNdviBody" style="display:none;">
+                        <div id="ndviStatus">No NDVI data</div>
+                        <div id="ndviLegend" style="margin-top:6px;display:none;">
+                            <div style="display:flex;height:14px;border-radius:3px;overflow:hidden;border:1px solid #ccc;">
+                                <div style="flex:1;background:rgb(184,54,10);"></div>
+                                <div style="flex:1;background:rgb(245,139,45);"></div>
+                                <div style="flex:1;background:rgb(255,232,34);"></div>
+                                <div style="flex:1;background:rgb(213,247,33);"></div>
+                                <div style="flex:1;background:rgb(129,232,40);"></div>
+                                <div style="flex:1;background:rgb(61,202,41);"></div>
+                                <div style="flex:1;background:rgb(38,125,27);"></div>
+                                <div style="flex:1;background:rgb(25,83,18);"></div>
+                                <div style="flex:1;background:rgb(16,49,13);"></div>
+                            </div>
+                            <div style="display:flex;font-size:10px;color:#666;">
+                                <span style="flex:1;">-0.1</span>
+                                <span style="flex:1;text-align:center;">0.2</span>
+                                <span style="flex:1;text-align:center;">0.4</span>
+                                <span style="flex:1;text-align:center;">0.6</span>
+                                <span style="flex:2;text-align:right;">1.0</span>
+                            </div>
+                        </div>
+                        <div id="ndviDatePicker" style="margin-top:4px;display:none;"><small style="color:#888;">Available dates:</small><div id="ndviDatesContainer" style="display:flex;flex-wrap:wrap;gap:3px;margin-top:2px;"></div></div>
+                        <button class="btn btn-sm btn-success btn-block" id="calcNdviBtn" style="margin-top:6px;">Calculate NDVI Now</button>
+                        <button class="btn btn-sm btn-info btn-block" id="showNdviBtn" style="display:none;margin-top:4px;">Show NDVI Overlay</button>
+                        <button class="btn btn-sm btn-outline-danger btn-block" id="hideNdviBtn" style="display:none;margin-top:4px;">Hide NDVI</button>
+                    </div>
+                </div>
+
+                <div class="card sidebar-card">
+                    <div class="card-header">Работы на поле</div>
+                    <div class="card-body">
+                        <div id="fieldOpsList"><span class="text-muted">Загрузка...</span></div>
+                        <button class="btn btn-sm btn-outline-success btn-block" onclick="toggleAddOpForm()" style="margin-top:6px;">+ Добавить работу</button>
+                        <div id="addOpForm" style="display:none;margin-top:6px;border-top:1px solid #ddd;padding-top:8px;">
+                            <div class="form-row">
+                                <div class="col-4 mb-1">
+                                    <input type="date" class="form-control form-control-sm" id="opDate">
+                                </div>
+                                <div class="col-8 mb-1">
+                                    <select class="form-control form-control-sm" id="opType">
+                                        <option value="">-- Тип работы --</option>
+                                        <option value="Вспашка">Вспашка</option>
+                                        <option value="Культивация">Культивация</option>
+                                        <option value="Дискование">Дискование</option>
+                                        <option value="Боронование">Боронование</option>
+                                        <option value="Прикатывание">Прикатывание</option>
+                                        <option value="Посев">Посев</option>
+                                        <option value="Посадка">Посадка</option>
+                                        <option value="Междурядная обработка">Междурядная обработка</option>
+                                        <option value="Окучивание">Окучивание</option>
+                                        <option value="Внесение удобрений">Внесение удобрений</option>
+                                        <option value="Опрыскивание СЗР">Опрыскивание СЗР</option>
+                                        <option value="Десикация">Десикация</option>
+                                        <option value="Орошение">Орошение</option>
+                                        <option value="Уборка">Уборка</option>
+                                        <option value="Силосование">Силосование</option>
+                                        <option value="Заготовка кормов">Заготовка кормов</option>
+                                        <option value="Другое">Другое</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="col-6 mb-1"><input type="text" class="form-control form-control-sm" id="opMachinery" placeholder="Агрегат"></div>
+                                <div class="col-6 mb-1"><input type="text" class="form-control form-control-sm" id="opOperator" placeholder="Механизатор"></div>
+                            </div>
+                            <div class="form-row">
+                                <div class="col-4 mb-1"><input type="number" class="form-control form-control-sm" id="opArea" step="0.01" placeholder="Площадь, га"></div>
+                                <div class="col-8 mb-1"><input type="text" class="form-control form-control-sm" id="opMaterial" placeholder="Материал / препарат"></div>
+                            </div>
+                            <div class="form-row">
+                                <div class="col-4 mb-1"><input type="text" class="form-control form-control-sm" id="opDose" placeholder="Норма (л/га, кг/га)"></div>
+                                <div class="col-4 mb-1"><input type="number" class="form-control form-control-sm" id="opFuel" step="0.1" placeholder="Топливо, л"></div>
+                                <div class="col-4 mb-1"><input type="number" class="form-control form-control-sm" id="opCost" step="0.01" placeholder="Затраты, руб"></div>
+                            </div>
+                            <div class="form-group mb-1">
+                                <input type="text" class="form-control form-control-sm" id="opNotes" placeholder="Примечание">
+                            </div>
+                            <button class="btn btn-sm btn-success btn-block" onclick="saveFieldOp()">Добавить</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="fieldPreviewBar" style="display:none;position:absolute;top:10px;right:52px;z-index:1000;background:rgba(255,255,255,0.95);border:1px solid #ccc;border-radius:4px;padding:6px 10px;font-size:0.85em;box-shadow:0 1px 4px rgba(0,0,0,.2);">
+                <b>Просмотр:</b> <span id="fieldPreviewName"></span>
+                <span id="fieldPreviewSectionsStatus" style="color:#888;display:none;">Загрузка секций...</span>
+                <span id="previewABControls" style="margin-left:10px;display:none;">
+                    <label style="font-weight:400;margin-right:4px;cursor:pointer;"><input type="radio" name="previewLineType" value="ab" checked onchange="onPreviewLineTypeChange()"> Прямая</label>
+                    <label style="font-weight:400;margin-right:8px;cursor:pointer;"><input type="radio" name="previewLineType" value="curve" onchange="onPreviewLineTypeChange()"> Кривая</label>
+                    <button type="button" id="previewABBtn" onclick="startPreviewAB()" style="cursor:pointer;">AB линия</button>
+                    <button type="button" id="previewABSaveBtn" onclick="savePreviewAB()" style="cursor:pointer;display:none;">Сохранить</button>
+                    <button type="button" id="previewABCancelBtn" onclick="cancelPreviewAB()" style="cursor:pointer;display:none;">Отмена</button>
+                </span>
+                <span id="previewABHint" style="color:#888;display:none;margin-left:8px;"></span>
+                <button type="button" onclick="closeFieldPreview()" title="Закрыть просмотр" style="margin-left:8px;border:none;background:none;font-size:1.1em;cursor:pointer;color:#dc3545;line-height:1;">&times;</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Field File Modals -->
+<div class="modal" id="fieldFileModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="fieldFileModalTitle">Действие</h5>
+          <button type="button" class="close" data-dismiss="modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div id="fieldFileModalBody"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-dismiss="modal">Отмена</button>
+          <button type="button" class="btn btn-primary" id="fieldFileModalOk">OK</button>
+        </div>
+      </div>
+    </div>
+</div>
+
+<!-- Tractor Track Sessions Modal -->
+<div class="modal" id="tractorSessionsModal">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Tracks: <span id="sessionsTractorName"></span></h5>
+          <button type="button" class="close" data-dismiss="modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="table-responsive"><table class="table table-sm table-striped">
+            <thead>
+              <tr><th>Date</th><th>Time</th><th>Points</th><th>Dist</th><th></th></tr>
+            </thead>
+            <tbody id="sessionsTableBody"></tbody>
+          </table></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{{super()}}
+<script type="text/javascript" src="{{ url_for('static', filename='lib/leaflet-1.7.js') }}"></script>
+<script>
+var baseCoordinates = {{ base_coordinates|tojson }};
+</script>
+<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5033') }}"></script>
+{% endblock %}
+

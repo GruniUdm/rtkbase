@@ -26,6 +26,7 @@ import math
 from glob import glob
 
 from log_converter import convbin
+import gpkg_helper
 
 class LogManager():
 
@@ -37,9 +38,17 @@ class LogManager():
         self.convbin = convbin.Convbin(rtklib_path)
 
         self.log_being_converted = ""
+        self._gpkg = None
 
         self.available_logs = []
         self.updateAvailableLogs()
+
+    def _get_gpkg(self):
+        if self._gpkg is None:
+            gpkg_path = os.path.join(self.log_path, 'tracks.gpkg')
+            if os.path.exists(gpkg_path):
+                self._gpkg = gpkg_helper.connect(gpkg_path)
+        return self._gpkg
 
     def updateAvailableLogs(self):
 
@@ -64,7 +73,23 @@ class LogManager():
                 "is_being_converted": is_being_converted
             })
 
-            self.available_logs.sort(key = lambda date: date['name'], reverse = True)
+        gpkg = self._get_gpkg()
+        if gpkg:
+            ips = gpkg_helper.get_track_ips(gpkg)
+            for ip in ips:
+                pts = gpkg_helper.get_track(gpkg, ip)
+                if not pts: continue
+                t0 = pts[0]['t']
+                t1 = pts[-1]['t']
+                duration = t1 - t0
+                log_name = "tracks/" + ip + ".csv"
+                log_size = "{:.2f}".format(len(pts) * 0.001)  # approximate MB
+                self.available_logs.append({
+                    "name": log_name, "size": log_size, "format": "TRACK",
+                    "is_being_converted": False
+                })
+
+        self.available_logs.sort(key = lambda date: date['name'], reverse = True)
         
         #Adding an id to each log
         id = 0
@@ -94,15 +119,11 @@ class LogManager():
         if os.path.isfile(potential_zip_path):
             return "RINEX"
         """
-        log_format = "?"
-        if extension :
-            if (extension in self.supported_solution_formats or
-                 extension in self.convbin.supported_log_formats):
-                log_format = extension.upper()
-            if extension in self.convbin.supported_output_formats:
-                log_format = "RINEX"
-        
-        return log_format
+        if (extension in self.supported_solution_formats or
+                    extension in self.convbin.supported_log_formats):
+            return extension.upper()
+        else:
+            return ""
 
     def formTimeString(self, seconds):
         # form a x minutes y seconds string from seconds
@@ -143,16 +164,21 @@ class LogManager():
                     print ("Error: " + e.filename + " - " + e.strerror)
 
     def deleteLog(self, log_filename):
+        # Handle GPKG-based track deletion
+        if log_filename.startswith('tracks/'):
+            ip = log_filename.replace('tracks/', '').replace('.csv', '')
+            gpkg = self._get_gpkg()
+            if gpkg:
+                n = gpkg_helper.delete_track(gpkg, ip)
+                print(f"Deleted {n} track points for {ip}")
+            return
+
         # try to delete log if it exists
-
-        #log_name, extension = os.path.splitext(log_filename)
-
-        # try to delete raw log
         print("Deleting log " + log_filename)
         try:
             os.remove(os.path.join(self.log_path, log_filename))
         except OSError as e:
-            print ("Error: " + e.log_filename + " - " + e.strerror)
+            print ("Error: " + e.filename + " - " + e.strerror)
 
         """
         print("Deleting log " + log_name + ".zip")
