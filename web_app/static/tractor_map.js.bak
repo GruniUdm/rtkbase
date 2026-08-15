@@ -1,0 +1,1420 @@
+var map;
+var tractorMarkers = {};
+var tractorTracks = {};
+var trackLastReload = {};
+var tractorPrevPos = {};
+var geozoneLayers = {};
+var drawMode = false;
+var drawPoints = [];
+var drawMarkers = [];
+var drawPolyline = null;
+var editingZoneId = null;
+var savedOriginalPoints = null;
+
+$(document).ready(function () {
+    map = L.map('map').setView({
+        lon: baseCoordinates.lon,
+        lat: baseCoordinates.lat
+    }, 15);
+
+    var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+    });
+    var sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: '&copy; Esri'
+    });
+    var s2 = L.tileLayer.wms('https://tiles.maps.eox.at/wms?', {
+        layers: 's2cloudless-2024_3857',
+        format: 'image/jpeg',
+        transparent: false,
+        attribution: '&copy; EOX / Copernicus Sentinel'
+    });
+    osm.addTo(map);
+    var layerControl = L.control.layers({'Map': osm, 'Satellite': sat, 'Sentinel-2': s2}, null, {position: 'bottomleft'}).addTo(map);
+
+    map.on("baselayerchange", function(e) {
+        if (e.name === "Sentinel-2") {
+            showAllNdviOverlays();
+        } else {
+            hideAllNdviOverlays();
+        }
+    });
+
+    var baseIcon = L.icon({
+        iconUrl: '/static/images/iconmonstr-crosshair-6-64.png',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+    });
+    L.marker(baseCoordinates, {icon: baseIcon}).addTo(map)
+        .bindTooltip('Base Station');
+
+    // Draw button
+    $('#drawBtn').on('click', toggleDrawMode);
+    $('#saveGeozoneBtn').on('click', function() {
+        if (drawMode && drawPoints.length >= 3) finishDraw();
+    });
+    $('#saveEditZoneBtn').on('click', saveEditZone);
+    $('#editPointsBtn').on('click', startEditPoints);
+    $('#savePointsBtn').on('click', saveEditedPoints);
+    $('#cancelPointsBtn').on('click', cancelEditPoints);
+
+    // Import KML button
+    $('#importKmlBtn').on('click', function() { $('#kmlFileInput').click(); });
+    $('#kmlFileInput').on('change', function(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function(ev) { importKml(ev.target.result); };
+        reader.readAsText(file);
+        this.value = '';
+    });
+
+    // Load geozones
+    loadGeozones();
+    map.on('dblclick', onMapDblClick);
+
+    // Load tracks from URL params and localStorage (run immediately and on socket connect)
+    function loadTracksFromParams() {
+        var params = new URLSearchParams(window.location.search);
+        var trackIp = params.get('track');
+        if (trackIp) { loadAndShowTrack(trackIp); }
+        var tracksParam = params.get('tracks');
+        if (tracksParam) {
+            tracksParam.split(',').forEach(function(ip) { if (ip) loadAndShowTrack(ip); });
+        }
+    }
+    function loadTracksFromStorage() {
+        try {
+            var stored = JSON.parse(localStorage.getItem('tractor_tracks_show') || '[]');
+            stored.forEach(function(ip) { loadAndShowTrack(ip); });
+        } catch(e) {}
+    }
+    loadTracksFromParams();
+    setTimeout(loadTracksFromStorage, 500);
+
+    var socket = io.connect('/test');
+    socket.on('tractors update', function(data) {
+        updateTractors(JSON.parse(data));
+    });
+    socket.on('connect', function() {
+        console.log('Connected to RTKBase');
+        loadTracksFromParams();
+        loadTracksFromStorage();
+    });
+});
+
+// -------- Geozone Drawing --------
+
+function toggleDrawMode() {
+    if (editingZoneId) { cancelEditPoints(); }
+    drawMode = !drawMode;
+    var btn = $('#drawBtn');
+    var info = $('#drawInfo');
+    var saveBtn = $('#saveGeozoneBtn');
+    if (drawMode) {
+        btn.text('Cancel').addClass('draw-active');
+        info.show();
+        map.getContainer().style.cursor = 'crosshair';
+        map.on('click', onDrawClick);
+        map.doubleClickZoom.disable();
+    } else {
+        cancelDraw();
+        btn.text('Draw Geozone').removeClass('draw-active');
+        info.hide();
+        saveBtn.hide();
+        map.getContainer().style.cursor = '';
+        map.off('click', onDrawClick);
+        map.doubleClickZoom.enable();
+    }
+}
+
+function cancelDraw() {
+    drawPoints = [];
+    if (drawPolyline) { map.removeLayer(drawPolyline); drawPolyline = null; }
+    drawMarkers.forEach(function(m) { map.removeLayer(m); });
+    drawMarkers = [];
+    $('#saveGeozoneBtn').hide();
+}
+
+function redrawDrawPolyline() {
+    if (drawPolyline) { map.removeLayer(drawPolyline); drawPolyline = null; }
+    if (drawPoints.length === 0) return;
+    var pts = drawPoints.concat([drawPoints[0]]);
+    drawPolyline = L.polyline(pts, {
+        color: '#e74c3c', weight: 2, dashArray: '5,5'
+    }).addTo(map);
+}
+
+function onDrawClick(e) {
+    var latlng = e.latlng;
+    var idx = drawPoints.length;
+    drawPoints.push([latlng.lat, latlng.lng]);
+
+    if (editingZoneId) {
+        createEditMarker([latlng.lat, latlng.lng], idx);
+        redrawDrawPolyline();
+        return;
+    }
+
+    var icon = L.divIcon({
+        className: '',
+        html: '<div style="width:12px;height:12px;border-radius:50%;border:2px solid #e74c3c;background:#fff;margin:-6px 0 0 -6px;cursor:pointer;"></div>',
+        iconSize: [12, 12],
+        iconAnchor: [6, 6]
+    });
+    var marker = L.marker(latlng, {icon: icon, draggable: true}).addTo(map);
+
+    marker.on('drag', function() {
+        var pos = marker.getLatLng();
+        drawPoints[idx] = [pos.lat, pos.lng];
+        redrawDrawPolyline();
+    });
+
+    marker.on('click', function() {
+        if (drawPoints.length === 0) return;
+        drawPoints.pop();
+        var last = drawMarkers.pop();
+        if (last) map.removeLayer(last);
+        redrawDrawPolyline();
+    });
+
+    drawMarkers.push(marker);
+    redrawDrawPolyline();
+
+    if (drawPoints.length >= 3) { $('#saveGeozoneBtn').show(); }
+}
+
+function onMapDblClick(e) {
+    if (!drawMode || drawPoints.length < 3) return;
+    finishDraw();
+}
+
+function finishDraw() {
+    if (drawPoints.length < 3) {
+        cancelDraw();
+        toggleDrawMode();
+        return;
+    }
+    var name = prompt('Enter geozone name:', 'Zone ' + (Object.keys(geozoneLayers).length + 1));
+    if (!name) { cancelDraw(); toggleDrawMode(); return; }
+
+    var payload = JSON.stringify({name: name, points: drawPoints});
+    fetch('/api/geozones', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: payload
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(zone) {
+        cancelDraw();
+        toggleDrawMode();
+        addGeozoneToMap(zone);
+        renderGeozoneList();
+    });
+}
+
+// -------- Geozone Display --------
+
+function loadGeozones() {
+    fetch('/api/geozones')
+        .then(function(r) { return r.json(); })
+        .then(function(zones) {
+            zones.forEach(addGeozoneToMap);
+            renderGeozoneList();
+        });
+}
+
+function addGeozoneToMap(zone) {
+    var closedPoints = zone.points.concat([zone.points[0]]);
+    var boundary = L.polyline(closedPoints, {
+        color: zone.color,
+        weight: 3,
+        opacity: 0.8
+    }).addTo(map);
+
+    var center = boundary.getBounds().getCenter();
+    var label = L.marker(center, {
+        icon: L.divIcon({
+            html: '<div style="background:' + zone.color + ';color:#fff;padding:2px 8px;border-radius:3px;font-size:0.85em;white-space:nowrap;text-shadow:0 0 2px #000,0 0 2px #000;">' + escapeHtml(zone.name) + '</div>',
+            className: '',
+            iconSize: [0, 0],
+            iconAnchor: [0, 0]
+        }),
+        interactive: false
+    }).addTo(map);
+
+    geozoneLayers[zone.id] = {polygon: boundary, label: label, data: zone, _hide: false};
+}
+
+function toggleGeozone(id) {
+    var layer = geozoneLayers[id];
+    if (!layer) return;
+    layer._hide = !layer._hide;
+    if (layer._hide) {
+        map.removeLayer(layer.polygon);
+        map.removeLayer(layer.label);
+    } else {
+        map.addLayer(layer.polygon);
+        map.addLayer(layer.label);
+    }
+}
+
+function renderGeozoneList() {
+    var html = '';
+    var hasZones = false;
+    for (var id in geozoneLayers) {
+        hasZones = true;
+        var z = geozoneLayers[id].data;
+        var checked = geozoneLayers[id]._hide ? '' : ' checked';
+        html += '<div class="geozone-item" onclick="focusGeozone(\'' + id + '\')" ondblclick="event.stopPropagation();editGeozone(\'' + id + '\')">' +
+            '<input type="checkbox"' + checked + ' onclick="event.stopPropagation();" onchange="toggleGeozone(\'' + id + '\');" style="vertical-align:middle;margin-right:4px;">' +
+            '<span class="geozone-color-dot" style="background:' + z.color + '"></span>' +
+            escapeHtml(z.name) +
+            '<span class="geozone-del" onclick="event.stopPropagation();deleteGeozone(\'' + id + '\');return false;">&times;</span>' +
+            '</div>';
+    }
+    $('#geozoneList').html(hasZones ? html : '<div class="text-muted" style="padding:8px;">No geozones</div>');
+}
+
+function focusGeozone(id) {
+    var layer = geozoneLayers[id];
+    if (!layer) return;
+    map.fitBounds(layer.polygon.getBounds().pad(0.2));
+    var pts = layer.data.points;
+    var areaHa = calculateArea(pts);
+    var perimM = calculatePerimeter(pts);
+    var html = '<b>' + escapeHtml(layer.data.name) + '</b><br>' +
+        'Area: ' + areaHa.toFixed(2) + ' ha<br>' +
+        'Crop: ' + escapeHtml(layer.data.crop || '-');
+    layer.polygon.unbindPopup();
+    layer.polygon.bindPopup(html).openPopup();
+}
+
+function deleteGeozone(id) {
+    if (!confirm('Delete this geozone?')) return;
+    fetch('/api/geozones/' + id, {method: 'DELETE'})
+        .then(function() {
+            if (geozoneLayers[id]) {
+                map.removeLayer(geozoneLayers[id].polygon);
+                map.removeLayer(geozoneLayers[id].label);
+                delete geozoneLayers[id];
+            }
+            renderGeozoneList();
+        });
+}
+
+function editGeozone(id) {
+    var layer = geozoneLayers[id];
+    if (!layer) return;
+    var z = layer.data;
+    $('#editZoneId').val(id);
+    $('#editZoneName').val(z.name || '');
+    $('#editZoneCrop').val(z.crop || '');
+    $('#editZonePlanted').val(z.planted_date || '');
+    $('#editZoneChemDate').val(z.last_chemical || '');
+    $('#editZoneChemName').val(z.chemical_name || '');
+    $('#editGeozoneModal').data('zone-id', id);
+    $('#editGeozoneModal').modal('show');
+}
+
+function startEditPoints() {
+    var id = $('#editGeozoneModal').data('zone-id');
+    if (!id || !geozoneLayers[id]) return;
+    editingZoneId = id;
+    var layer = geozoneLayers[id];
+    savedOriginalPoints = JSON.parse(JSON.stringify(layer.data.points));
+
+    // Hide existing polygon/label
+    map.removeLayer(layer.polygon);
+    map.removeLayer(layer.label);
+
+    // Initialize draw points from existing points
+    drawPoints = savedOriginalPoints.map(function(p) { return [p[0], p[1]]; });
+
+    // Create markers for each point
+    drawPoints.forEach(function(latlng, idx) { createEditMarker(latlng, idx); });
+
+    // Draw polyline
+    redrawDrawPolyline();
+
+    // Enable map click to add points
+    map.on('click', onDrawClick);
+    map.doubleClickZoom.disable();
+    map.getContainer().style.cursor = 'crosshair';
+
+    $('#editGeozoneModal').modal('hide');
+    $('#savePointsBtn, #cancelPointsBtn').show();
+    $('#drawInfo').text('Click on map to add points. Click a marker to remove last point. Drag to move.').show();
+}
+
+function createEditMarker(latlng, idx) {
+    var icon = L.divIcon({
+        className: '',
+        html: '<div style="width:12px;height:12px;border-radius:50%;border:2px solid #e67e22;background:#fff;margin:-6px 0 0 -6px;cursor:pointer;"></div>',
+        iconSize: [12, 12],
+        iconAnchor: [6, 6]
+    });
+    var marker = L.marker(latlng, {icon: icon, draggable: true}).addTo(map);
+    marker._editIdx = idx;
+    marker.on('drag', function() {
+        var pos = marker.getLatLng();
+        drawPoints[marker._editIdx] = [pos.lat, pos.lng];
+        redrawDrawPolyline();
+    });
+    marker.on('click', function(e) {
+        e.originalEvent.stopPropagation();
+        var i = marker._editIdx;
+        if (drawPoints.length <= 3) return;
+        map.removeLayer(marker);
+        drawPoints.splice(i, 1);
+        drawMarkers.splice(drawMarkers.indexOf(marker), 1);
+        // Re-index remaining markers
+        drawMarkers.forEach(function(m, j) { m._editIdx = j; });
+        redrawDrawPolyline();
+    });
+    drawMarkers.push(marker);
+}
+
+function saveEditedPoints() {
+    if (!editingZoneId || drawPoints.length < 3) return;
+    fetch('/api/geozones/' + editingZoneId, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({points: drawPoints})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(zone) {
+        cancelEditPoints();
+        // Reload the zone display
+        if (geozoneLayers[editingZoneId]) {
+            var old = geozoneLayers[editingZoneId];
+            map.removeLayer(old.polygon);
+            map.removeLayer(old.label);
+            delete geozoneLayers[editingZoneId];
+        }
+        addGeozoneToMap(zone);
+        renderGeozoneList();
+        editingZoneId = null;
+    });
+}
+
+function cancelEditPoints() {
+    if (editingZoneId && savedOriginalPoints && geozoneLayers[editingZoneId]) {
+        var layer = geozoneLayers[editingZoneId];
+        // Restore original polygon/label
+        if (layer.polygon) map.addLayer(layer.polygon);
+        if (layer.label) map.addLayer(layer.label);
+    }
+    drawPoints = [];
+    if (drawPolyline) { map.removeLayer(drawPolyline); drawPolyline = null; }
+    drawMarkers.forEach(function(m) { map.removeLayer(m); });
+    drawMarkers = [];
+    map.off('click', onDrawClick);
+    map.doubleClickZoom.enable();
+    map.getContainer().style.cursor = '';
+    $('#savePointsBtn, #cancelPointsBtn').hide();
+    $('#drawInfo').hide();
+    editingZoneId = null;
+    savedOriginalPoints = null;
+}
+
+function saveEditZone() {
+    var id = $('#editZoneId').val();
+    if (!id) return;
+    var data = {
+        name: $('#editZoneName').val(),
+        crop: $('#editZoneCrop').val(),
+        planted_date: $('#editZonePlanted').val(),
+        last_chemical: $('#editZoneChemDate').val(),
+        chemical_name: $('#editZoneChemName').val()
+    };
+    fetch('/api/geozones/' + id, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(zone) {
+        geozoneLayers[id].data = zone;
+        renderGeozoneList();
+        // update label on map
+        var z = geozoneLayers[id];
+        map.removeLayer(z.label);
+        var center = z.polygon.getBounds().getCenter();
+        z.label = L.marker(center, {
+            icon: L.divIcon({
+                html: '<div style="background:' + zone.color + ';color:#fff;padding:2px 8px;border-radius:3px;font-size:0.85em;white-space:nowrap;text-shadow:0 0 2px #000,0 0 2px #000;">' + escapeHtml(zone.name) + '</div>',
+                className: '',
+                iconSize: [0, 0],
+                iconAnchor: [0, 0]
+            }),
+            interactive: false
+        }).addTo(map);
+        $('#editGeozoneModal').modal('hide');
+    });
+}
+
+function importKml(kmlText) {
+    var parser = new DOMParser();
+    var xml = parser.parseFromString(kmlText, 'text/xml');
+    var placemarks = xml.querySelectorAll('Placemark');
+    var candidates = [];
+    placemarks.forEach(function(pm) {
+        var coordsEl = pm.querySelector('outerBoundaryIs LinearRing coordinates');
+        if (!coordsEl) return;
+        var raw = coordsEl.textContent.trim();
+        var parts = raw.split(/[\s,]+/);
+        var latlngs = [];
+        for (var i = 0; i + 2 < parts.length; i += 3) {
+            var lon = parseFloat(parts[i]);
+            var lat = parseFloat(parts[i + 1]);
+            if (!isNaN(lat) && !isNaN(lon)) latlngs.push([lat, lon]);
+        }
+        if (latlngs.length < 3) return;
+        candidates.push({points: latlngs, count: latlngs.length});
+    });
+    if (candidates.length === 0) { alert('No valid polygons found in KML file'); return; }
+    // Pick the largest polygon (field boundary) — skip implement sections
+    var best = candidates.reduce(function(a, b) { return a.count > b.count ? a : b; });
+    var name = xml.querySelector('Placemark name');
+    var nameText = name ? name.textContent.trim() : 'Imported';
+
+    fetch('/api/geozones', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: nameText, points: best.points})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(zone) {
+        addGeozoneToMap(zone);
+        renderGeozoneList();
+    });
+}
+
+function escapeHtml(text) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(text));
+    return div.innerHTML;
+}
+
+// -------- Area & Perimeter --------
+
+function toRad(deg) { return deg * Math.PI / 180; }
+
+function haversineDist(a, b) {
+    var R = 6371000;
+    var dLat = toRad(b[0] - a[0]);
+    var dLon = toRad(b[1] - a[1]);
+    var sinLat = Math.sin(dLat / 2);
+    var sinLon = Math.sin(dLon / 2);
+    var x = sinLat * sinLat + Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * sinLon * sinLon;
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+function calculateArea(latlngs) {
+    var originLat = latlngs[0][0], originLon = latlngs[0][1];
+    var cosLat = Math.cos(toRad(originLat));
+    var xs = [], ys = [];
+    for (var i = 0; i < latlngs.length; i++) {
+        xs.push((latlngs[i][1] - originLon) * 111320 * cosLat);
+        ys.push((latlngs[i][0] - originLat) * 111320);
+    }
+    var area = 0;
+    var n = latlngs.length;
+    for (var i = 0; i < n; i++) {
+        var j = (i + 1) % n;
+        area += xs[i] * ys[j] - xs[j] * ys[i];
+    }
+    return Math.abs(area) / 20000;
+}
+
+function calculatePerimeter(latlngs) {
+    var perim = 0;
+    for (var i = 0; i < latlngs.length; i++) {
+        var j = (i + 1) % latlngs.length;
+        perim += haversineDist(latlngs[i], latlngs[j]);
+    }
+    return perim;
+}
+
+// -------- Point-in-Polygon --------
+
+function pointInPolygon(pLat, pLon, points) {
+    var inside = false;
+    var n = points.length;
+    for (var i = 0, j = n - 1; i < n; j = i++) {
+        var lat1 = points[i][0], lon1 = points[i][1];
+        var lat2 = points[j][0], lon2 = points[j][1];
+        if ((lat1 > pLat) !== (lat2 > pLat)) {
+            var xInt = lon1 + (pLat - lat1) * (lon2 - lon1) / (lat2 - lat1);
+            if (pLon < xInt) inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// -------- Tractor Tracking --------
+
+function updateTractors(tractors) {
+    var listHtml = '';
+    var now = Date.now() / 1000;
+    for (var username in tractors) {
+        var t = tractors[username];
+        var lat = parseFloat(t.lat);
+        var lon = parseFloat(t.lon);
+        var lastSeen = t.last_seen || 0;
+        var age = Math.round(now - lastSeen);
+        var isOnline = age < 30;
+
+        if (!tractorMarkers[username]) {
+            tractorMarkers[username] = createTractorMarker(username);
+            loadTrack(username);
+            trackLastReload[username] = now;
+            tractorPrevPos[username] = null;
+        } else if (isOnline && now - (trackLastReload[username] || 0) > 10) {
+            loadTrack(username);
+            trackLastReload[username] = now;
+        }
+
+        // Calculate speed from consecutive positions
+        var speedKmph = 0;
+        if (tractorPrevPos[username]) {
+            var prev = tractorPrevPos[username];
+            var dt = now - prev.t;
+            if (dt > 0) {
+                var d = haversineDist([prev.lat, prev.lon], [lat, lon]);
+                speedKmph = (d / dt) * 3.6;
+            }
+        }
+        tractorPrevPos[username] = {lat: lat, lon: lon, t: now};
+
+        tractorMarkers[username]._speed = speedKmph;
+        tractorMarkers[username].setLatLng([lat, lon]);
+
+        var zoneLabel = '';
+        for (var zid in geozoneLayers) {
+            if (geozoneLayers[zid]._hide) continue;
+            if (pointInPolygon(lat, lon, geozoneLayers[zid].data.points)) {
+                zoneLabel = ' <span class="badge badge-info" style="font-size:0.75em;background:' + geozoneLayers[zid].data.color + ';color:#fff;">' + escapeHtml(geozoneLayers[zid].data.name) + '</span>';
+                break;
+            }
+        }
+        listHtml += '<div class="tractor-item ' + (isOnline ? '' : 'offline') +
+            '" onclick="focusTractor(\'' + username + '\')">' +
+            '<strong>' + escapeHtml(username) + '</strong> ' +
+            zoneLabel +
+            '<span class="' + (isOnline ? 'badge-online' : 'badge-offline') + '">' +
+            (isOnline ? 'Online' : age + 's') + '</span><br>' +
+            '<small>' + lat.toFixed(6) + ', ' + lon.toFixed(6) + '</small>' +
+            ' <a href="#" onclick="event.stopPropagation();toggleTrack(\'' + username + '\');return false;">[track]</a></div>';
+    }
+    $('#tractorList').html(listHtml || '<div class="text-muted" style="padding:8px;">No tractors</div>');
+}
+
+function calcTrackDistance(latlngs) {
+    var d = 0;
+    for (var i = 1; i < latlngs.length; i++) d += haversineDist(latlngs[i - 1], latlngs[i]);
+    return d;
+}
+
+function trackTooltip(d) {
+    if (d < 1000) return 'Track: ' + d.toFixed(0) + ' m';
+    return 'Track: ' + (d / 1000).toFixed(2) + ' km';
+}
+
+function loadTrack(username) {
+    fetch('/api/tractor_track/' + username)
+        .then(function(r) { return r.json(); })
+        .then(function(points) {
+            if (!points || points.length < 2) return;
+            var latlngs = points.map(function(p) { return [p.lat, p.lon]; });
+            var polyline = L.polyline(latlngs, {
+                color: '#e74c3c',
+                weight: 2,
+                opacity: 0.6
+            }).addTo(map);
+            var d = calcTrackDistance(latlngs);
+            polyline.bindTooltip(trackTooltip(d), {sticky: true});
+            tractorTracks[username] = polyline;
+            polyline._hide = false;
+        });
+}
+
+function loadAndShowTrack(ip) {
+    console.log('loadAndShowTrack:', ip);
+    fetch('/api/tractor_track/' + ip)
+        .then(function(r) {
+            if (!r.ok) { console.error('Track fetch failed:', ip, r.status); return null; }
+            return r.json();
+        })
+        .then(function(points) {
+            if (!points || points.length < 2) { console.log('Track no data:', ip); return; }
+            var latlngs = points.map(function(p) { return [p.lat, p.lon]; });
+            var polyline = L.polyline(latlngs, {
+                color: '#e74c3c',
+                weight: 2,
+                opacity: 0.6
+            }).addTo(map);
+            var d = calcTrackDistance(latlngs);
+            polyline.bindTooltip(trackTooltip(d), {sticky: true});
+            tractorTracks[ip] = polyline;
+            polyline._hide = false;
+            map.fitBounds(polyline.getBounds().pad(0.1));
+            console.log('Track loaded:', ip, latlngs.length, 'points', d.toFixed(0) + 'm');
+        })
+        .catch(function(e) { console.error('Track error:', ip, e); });
+}
+
+function toggleTrack(username) {
+    var poly = tractorTracks[username];
+    if (!poly) return;
+    poly._hide = !poly._hide;
+    if (poly._hide) {
+        map.removeLayer(poly);
+    } else {
+        map.addLayer(poly);
+    }
+}
+
+function createTractorMarker(username) {
+    var svgIcon = L.divIcon({
+        html: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none">' +
+              '<circle cx="12" cy="12" r="10" fill="#e74c3c" stroke="#fff" stroke-width="2"/>' +
+              '<path d="M7 14h10l-2-6H9l-2 6z" fill="#fff"/>' +
+              '<rect x="8" y="14" width="2" height="3" rx="1" fill="#333"/>' +
+              '<rect x="14" y="14" width="2" height="3" rx="1" fill="#333"/></svg>',
+        className: '',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+    });
+    var marker = L.marker([0, 0], {icon: svgIcon}).addTo(map);
+    marker.bindTooltip(escapeHtml(username), {offset: L.point(20, 0)});
+    return marker;
+}
+
+
+var ndviAutoShown = false;
+var ndviAllZoneIds = [];
+var ndviLegend = null;
+var ndviDateLabels = {};
+
+function showAllNdviOverlays() {
+    if (ndviAutoShown) return;
+    // Wait for geozone polygons to load before creating date labels
+    if (Object.keys(geozoneLayers).length === 0) {
+        setTimeout(showAllNdviOverlays, 300);
+        return;
+    }
+    if (!ndviLegend) {
+        ndviLegend = L.control({position: "bottomright"});
+        ndviLegend.onAdd = function(map) {
+            var div = L.DomUtil.create("div");
+            div.style.background = "#fff";
+            div.style.padding = "6px 10px";
+            div.style.borderRadius = "4px";
+            div.style.boxShadow = "0 1px 5px rgba(0,0,0,0.4)";
+            div.style.fontSize = "12px";
+            div.style.lineHeight = "1.4";
+            div.innerHTML = "<b>NDVI</b><br>" +
+                "<div style='width:18px;height:100px;display:inline-block;vertical-align:middle;border:1px solid #ccc;background:linear-gradient(to top,#001900,#002800,#003c00,#006400,#228b22,#7cfc00,#ffff00,#8b4513);'></div>" +
+                "<div style='display:inline-block;vertical-align:middle;padding-left:4px;'>" +
+                "1.0<br>0.8<br>0.6<br>0.45<br>0.3<br>0.15<br>0.0</div>";
+            return div;
+        };
+    }
+    ndviLegend.addTo(map);
+    fetch("/api/ndvi/layers")
+        .then(function(r) { return r.json(); })
+        .then(function(layers) {
+            ndviAllZoneIds = layers.map(function(l) { return l.zone_id; });
+            ndviAllZoneIds.forEach(function(zid) {
+                if (!ndviOverlays[zid]) showNdviOverlay(zid);
+                fetch("/api/ndvi/data/" + zid)
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (data && data.scene_date && geozoneLayers[zid]) {
+                            var center = geozoneLayers[zid].polygon.getBounds().getCenter();
+                            var label = L.marker(center, {
+                                icon: L.divIcon({
+                                    html: "<div style='background:rgba(0,0,0,0.7);color:#fff;padding:2px 6px;border-radius:3px;font-size:0.8em;white-space:nowrap;margin-top:22px;'>" +
+                                        data.scene_date + " NDVI:" + parseFloat(data.mean_ndvi).toFixed(2) + "</div>",
+                                    className: "",
+                                    iconSize: [0, 0],
+                                    iconAnchor: [0, 0]
+                                }),
+                                interactive: false
+                            }).addTo(map);
+                            ndviDateLabels[zid] = label;
+                        }
+                    });
+            });
+            ndviAutoShown = true;
+        })
+        .catch(function(e) { console.log("NDVI auto-show failed:", e); });
+}
+
+function hideAllNdviOverlays() {
+    for (var zid in ndviOverlays) {
+        map.removeLayer(ndviOverlays[zid]);
+        delete ndviOverlays[zid];
+    }
+    for (var zid in ndviDateLabels) {
+        map.removeLayer(ndviDateLabels[zid]);
+        delete ndviDateLabels[zid];
+    }
+    if (ndviLegend) {
+        map.removeControl(ndviLegend);
+    }
+    ndviAutoShown = false;
+}
+
+// -------- NDVI --------
+
+var ndviOverlays = {};
+var ndviSelectedDate = null;
+var ndviAvailableDates = [];
+
+function loadNdviDates(zoneId) {
+    fetch("/api/ndvi/scenes/" + zoneId)
+        .then(function(r) { return r.json(); })
+        .then(function(dates) {
+            ndviAvailableDates = dates || [];
+            var container = document.getElementById("ndviDatesContainer");
+            var picker = document.getElementById("ndviDatePicker");
+            if (!container || !picker) return;
+            if (!ndviAvailableDates.length) {
+                picker.style.display = "none";
+                return;
+            }
+            picker.style.display = "block";
+            container.innerHTML = "";
+            ndviAvailableDates.forEach(function(d) {
+                var btn = document.createElement("button");
+                var dateStr = d.scene_date || d;
+                btn.textContent = dateStr;
+                btn.className = "btn btn-xs " + (dateStr === ndviSelectedDate ? "btn-primary" : "btn-outline-secondary");
+                btn.style.fontSize = "0.75em";
+                btn.style.padding = "1px 5px";
+                btn.style.border = "1px solid #aaa";
+                btn.style.borderRadius = "3px";
+                btn.style.cursor = "pointer";
+                btn.onclick = function() {
+                    ndviSelectedDate = dateStr;
+                    loadNdviDates(zoneId);
+                    loadNdviStatus(zoneId);
+                    showNdviOverlay(zoneId, dateStr);
+                };
+                container.appendChild(btn);
+            });
+        })
+        .catch(function(e) { console.log("NDVI dates error:", e); });
+}
+
+function loadNdviStatus(zoneId) {
+    fetch("/api/ndvi/data/" + zoneId)
+        .then(function(r) {
+            if (r.redirected || !r.ok) {
+                $("#ndviStatus").html("No NDVI data");
+                $("#calcNdviBtn").show();
+                $("#showNdviBtn, #hideNdviBtn").hide();
+                return null;
+            }
+            return r.json();
+        })
+        .then(function(data) {
+            if (!data || data.error) {
+                $("#ndviStatus").html("No NDVI data");
+                $("#calcNdviBtn").show();
+                $("#showNdviBtn, #hideNdviBtn").hide();
+                return;
+            }
+            var ndvi = data.mean_ndvi;
+            var html = "Mean NDVI: <b>" + parseFloat(ndvi).toFixed(3) + "</b>" +
+                " (min: " + parseFloat(data.min_ndvi).toFixed(3) +
+                ", max: " + parseFloat(data.max_ndvi).toFixed(3) + ")<br>" +
+                "<small>Scene: " + (data.scene_date || "unknown") + "</small>";
+            $("#ndviStatus").html(html);
+            $("#calcNdviBtn").text("Recalculate NDVI").show();
+            $("#showNdviBtn").show();
+            loadNdviDates(zoneId);
+        });
+}
+
+function showNdviOverlay(zoneId, sceneDate) {
+    var dateParam = sceneDate ? "?date=" + sceneDate : "";
+    var overlayUrl = "/api/ndvi/overlay/" + zoneId + ".png" + dateParam;
+    fetch(overlayUrl)
+        .then(function(r) {
+            if (!r.ok) throw new Error("NDVI overlay not found");
+            var bbox = JSON.parse(r.headers.get("X-Bbox") || "[]");
+            return r.blob().then(function(blob) { return {bbox: bbox, blob: blob}; });
+        })
+        .then(function(data) {
+            if (data.bbox.length !== 4) throw new Error("Invalid bbox");
+            var bounds = [[data.bbox[1], data.bbox[0]], [data.bbox[3], data.bbox[2]]];
+            var imageUrl = URL.createObjectURL(data.blob);
+            var overlay = L.imageOverlay(imageUrl, bounds, {opacity: 0.7}).addTo(map);
+            if (ndviOverlays[zoneId]) {
+                map.removeLayer(ndviOverlays[zoneId]);
+            }
+            ndviOverlays[zoneId] = overlay;
+            $("#showNdviBtn").hide();
+            $("#hideNdviBtn").show();
+        })
+        .catch(function(e) {
+            console.log("NDVI overlay failed:", e.message);
+        });
+}
+
+function hideNdviOverlay(zoneId) {
+    if (ndviOverlays[zoneId]) {
+        map.removeLayer(ndviOverlays[zoneId]);
+        delete ndviOverlays[zoneId];
+    }
+    $("#showNdviBtn").show();
+    $("#hideNdviBtn").hide();
+}
+
+// Wire up NDVI buttons
+$("#editGeozoneModal").on("show.bs.modal", function() {
+    var zoneId = $(this).data("zone-id");
+    if (zoneId) loadNdviStatus(zoneId);
+});
+
+$("#calcNdviBtn").click(function() {
+    var zoneId = $("#editZoneId").val() || $("#editGeozoneModal").data("zone-id");
+    if (!zoneId) {
+        $("#ndviStatus").html('<span style="color:red">Error: no zone selected</span>');
+        return;
+    }
+    $("#calcNdviBtn").prop("disabled", true).text("Calculating... (60-90s)");
+    $("#ndviStatus").html("Calculating NDVI...");
+    fetch("/api/ndvi/calculate/" + zoneId, {method: "POST"})
+        .then(function(r) {
+            if (r.redirected) {
+                $("#ndviStatus").html('<span style="color:red">Session expired, please refresh and login</span>');
+                $("#calcNdviBtn").prop("disabled", false).text("Calculate NDVI Now");
+                return null;
+            }
+            return r.json();
+        })
+        .then(function(result) {
+            if (!result) return;
+            if (result.error) {
+                $("#ndviStatus").html('<span style="color:red">Error: ' + result.error + "</span>");
+                $("#calcNdviBtn").prop("disabled", false).text("Calculate NDVI Now");
+                return;
+            }
+            loadNdviStatus(zoneId);
+            $("#calcNdviBtn").prop("disabled", false);
+        })
+        .catch(function(e) {
+            $("#ndviStatus").html('<span style="color:red">Request failed: ' + e.message + "</span>");
+            $("#calcNdviBtn").prop("disabled", false).text("Calculate NDVI Now");
+        });
+});
+
+$("#showNdviBtn").click(function() {
+    var zoneId = $("#editGeozoneModal").data("zone-id");
+    if (zoneId) showNdviOverlay(zoneId);
+});
+
+$("#hideNdviBtn").click(function() {
+    var zoneId = $("#editGeozoneModal").data("zone-id");
+    if (zoneId) hideNdviOverlay(zoneId);
+});
+
+// Clean up NDVI overlay when modal is hidden
+$("#editGeozoneModal").on("hidden.bs.modal", function() {
+    var zoneId = $(this).data("zone-id");
+    if (zoneId) hideNdviOverlay(zoneId);
+});
+
+// -------- NDVI Calendar (all zones) --------
+
+function loadNdviCalendar() {
+    fetch("/api/ndvi/scenes")
+        .then(function(r) { return r.json(); })
+        .then(function(scenes) {
+            var container = document.getElementById("ndviCalendarDates");
+            if (!container) return;
+            var dateMap = {};
+            scenes.forEach(function(s) {
+                var d = s.scene_date;
+                if (d) dateMap[d] = (dateMap[d] || 0) + 1;
+            });
+            var sortedDates = Object.keys(dateMap).sort().reverse();
+            if (sortedDates.length === 0) {
+                container.innerHTML = '<span class="text-muted" style="padding:4px;font-size:0.85em;">No NDVI data</span>';
+                return;
+            }
+            container.innerHTML = "";
+            sortedDates.forEach(function(d) {
+                var count = dateMap[d];
+                var btn = document.createElement("button");
+                btn.textContent = d;
+                btn.title = count + " zone(s)";
+                btn.className = "btn btn-xs " + (d === ndviSelectedDate ? "btn-primary" : "btn-outline-secondary");
+                btn.style.fontSize = "0.75em";
+                btn.style.padding = "2px 6px";
+                btn.style.border = "1px solid #aaa";
+                btn.style.borderRadius = "3px";
+                btn.style.cursor = "pointer";
+                btn.onclick = function() {
+                    ndviSelectedDate = d;
+                    showAllNdviForDate(d);
+                    loadNdviCalendar();
+                };
+                container.appendChild(btn);
+            });
+        })
+        .catch(function(e) { console.log("NDVI calendar error:", e); });
+}
+
+function showAllNdviForDate(date) {
+    hideAllNdviOverlays();
+    for (var zid in geozoneLayers) {
+        (function(zoneId) {
+            var overlayUrl = "/api/ndvi/overlay/" + zoneId + ".png?date=" + date;
+            fetch(overlayUrl)
+                .then(function(r) {
+                    if (!r.ok) return null;
+                    var bbox = JSON.parse(r.headers.get("X-Bbox") || "[]");
+                    return r.blob().then(function(blob) { return {bbox: bbox, blob: blob}; });
+                })
+                .then(function(data) {
+                    if (!data || data.bbox.length !== 4) return;
+                    var bounds = [[data.bbox[1], data.bbox[0]], [data.bbox[3], data.bbox[2]]];
+                    var imageUrl = URL.createObjectURL(data.blob);
+                    var overlay = L.imageOverlay(imageUrl, bounds, {opacity: 0.7}).addTo(map);
+                    if (ndviOverlays[zoneId]) {
+                        map.removeLayer(ndviOverlays[zoneId]);
+                    }
+                    ndviOverlays[zoneId] = overlay;
+                    fetch("/api/ndvi/data/" + zoneId + "?date=" + date)
+                        .then(function(r2) { return r2.ok ? r2.json() : null; })
+                        .then(function(data2) {
+                            if (data2 && !data2.error && geozoneLayers[zoneId]) {
+                                var center = geozoneLayers[zoneId].polygon.getBounds().getCenter();
+                                var label = L.marker(center, {
+                                    icon: L.divIcon({
+                                        html: "<div style='background:rgba(0,0,0,0.7);color:#fff;padding:2px 6px;border-radius:3px;font-size:0.8em;white-space:nowrap;margin-top:22px;'>" +
+                                            data2.scene_date + " NDVI:" + parseFloat(data2.mean_ndvi).toFixed(2) + "</div>",
+                                        className: "",
+                                        iconSize: [0, 0],
+                                        iconAnchor: [0, 0]
+                                    }),
+                                    interactive: false
+                                }).addTo(map);
+                                ndviDateLabels[zoneId] = label;
+                            }
+                        });
+                })
+                .catch(function(e) {});
+        })(zid);
+    }
+    if (!ndviLegend) {
+        ndviLegend = L.control({position: "bottomright"});
+        ndviLegend.onAdd = function(map) {
+            var div = L.DomUtil.create("div");
+            div.style.background = "#fff";
+            div.style.padding = "6px 10px";
+            div.style.borderRadius = "4px";
+            div.style.boxShadow = "0 1px 5px rgba(0,0,0,0.4)";
+            div.style.fontSize = "12px";
+            div.style.lineHeight = "1.4";
+            div.innerHTML = "<b>NDVI</b><br>" +
+                "<div style='width:18px;height:100px;display:inline-block;vertical-align:middle;border:1px solid #ccc;background:linear-gradient(to top,#001900,#002800,#003c00,#006400,#228b22,#7cfc00,#ffff00,#8b4513);'></div>" +
+                "<div style='display:inline-block;vertical-align:middle;padding-left:4px;'>1.0<br>0.8<br>0.6<br>0.45<br>0.3<br>0.15<br>0.0</div>";
+            return div;
+        };
+    }
+    ndviLegend.addTo(map);
+    $("#ndviShowCalendarBtn").hide();
+    $("#ndviHideCalendarBtn").show();
+}
+
+$("#ndviShowCalendarBtn").click(function() {
+    loadNdviCalendar();
+});
+
+$("#ndviHideCalendarBtn").click(function() {
+    hideAllNdviOverlays();
+    ndviSelectedDate = null;
+    loadNdviCalendar();
+    $("#ndviShowCalendarBtn").show();
+    $("#ndviHideCalendarBtn").hide();
+});
+
+// Load NDVI calendar on page ready
+loadNdviCalendar();
+
+// === Task Planner (sidebar) ===
+var taskPlannerActive = false;
+var plannerPathLayer = null;
+var prevBaseLayer = null;
+
+function openTaskPlanner(zoneId) {
+    if (!zoneId) return;
+    var z = geozoneLayers[zoneId];
+    if (!z) return;
+    
+    taskPlannerActive = true;
+    $("#plannerZoneId").val(zoneId);
+    $("#taskPlannerSection").show();
+    
+    // Center map on geozone
+    var bounds = z.polygon.getBounds();
+    map.fitBounds(bounds.pad(0.2));
+    
+    // Switch to Satellite layer
+    if (!map.hasLayer(sat)) {
+        map.eachLayer(function(layer) {
+            if (layer._url && layer._url.indexOf("openstreetmap") !== -1) {
+                prevBaseLayer = layer;
+                map.removeLayer(layer);
+            }
+        });
+        map.addLayer(sat);
+    }
+    
+    // Hide edit modal
+    $("#editGeozoneModal").modal("hide");
+    
+    // Load saved tasks
+    loadPlannerTasks(zoneId);
+    
+    // Reset UI
+    $("#plannerInfo").hide();
+    $("#plannerSaveBtn").hide();
+    clearPlannerPreview();
+}
+
+function closeTaskPlanner() {
+    taskPlannerActive = false;
+    $("#taskPlannerSection").hide();
+    
+    // Restore previous base layer
+    if (prevBaseLayer) {
+        map.removeLayer(sat);
+        map.addLayer(prevBaseLayer);
+        prevBaseLayer = null;
+    }
+    
+    clearPlannerPreview();
+}
+
+function clearPlannerPreview() {
+    if (plannerPathLayer) {
+        map.removeLayer(plannerPathLayer);
+        plannerPathLayer = null;
+    }
+}
+
+$("#plannerCloseBtn").click(function() {
+    closeTaskPlanner();
+});
+
+$("#plannerGenerateBtn").click(function() {
+    var zoneId = $("#plannerZoneId").val();
+    var swathWidth = parseFloat($("#plannerSwathWidth").val()) || 10;
+    var turningRadius = parseFloat($("#plannerTurningRadius").val());
+    if (!turningRadius || turningRadius <= 0) turningRadius = swathWidth / 2;
+    var angle = parseFloat($("#plannerAngle").val()) || 0;
+    var boundaryOffset = parseFloat($("#plannerBoundaryOffset").val()) || 0;
+    var boundaryPass = $("#plannerBoundaryPass").is(":checked");
+    
+    if (!zoneId) return;
+    $("#plannerGenerateBtn").prop("disabled", true).text("Generating...");
+    
+    fetch("/api/geozones/" + zoneId + "/generate_path", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({swath_width: swathWidth, angle: angle, turning_radius: turningRadius, offset: boundaryOffset, boundary_pass: boundaryPass})
+    })
+    .then(function(r) {
+        if (r.redirected) return null;
+        return r.json();
+    })
+    .then(function(result) {
+        $("#plannerGenerateBtn").prop("disabled", false).text("Generate");
+        if (!result) return;
+        if (result.error) {
+            alert("Error: " + result.error);
+            return;
+        }
+        showPlannerPreview(result);
+    })
+    .catch(function(e) {
+        $("#plannerGenerateBtn").prop("disabled", false).text("Generate");
+        alert("Request failed: " + e.message);
+    });
+});
+
+// Auto-update turning radius default when swath width changes
+$("#plannerSwathWidth").on("input change", function() {
+    var tr = $("#plannerTurningRadius").val();
+    if (!tr || parseFloat(tr) <= 0) {
+        var sw = parseFloat($(this).val()) || 10;
+        $("#plannerTurningRadius").val((sw / 2).toFixed(1));
+    }
+});
+
+function showPlannerPreview(result) {
+    clearPlannerPreview();
+    
+    var feature = result.features[0];
+    var props = feature.properties;
+    var coords = feature.geometry.coordinates;
+    
+    // Show path on main map
+    plannerPathLayer = L.polyline(coords.map(function(c) { return [c[1], c[0]]; }), {
+        color: "#e74c3c",
+        weight: 3,
+        opacity: 0.8
+    }).addTo(map);
+    
+    map.fitBounds(plannerPathLayer.getBounds().pad(0.1));
+    
+    // Show info
+    var km = (props.total_length_m / 1000).toFixed(1);
+    var bpLabel = $("#plannerBoundaryPass").is(":checked") ? " + boundary pass" : "";
+    $("#plannerInfo").html(
+        '<strong>' + props.num_swaths + '</strong> swaths, ' +
+        '<strong>' + props.swath_width + '</strong>m width, ' +
+        '<strong>' + km + '</strong> km'
+    ).show();
+    $("#plannerSaveBtn").show().data("result", result);
+}
+
+$("#plannerSaveBtn").click(function() {
+    var zoneId = $("#plannerZoneId").val();
+    var name = $("#plannerTaskName").val() || "Coverage Task";
+    var swathWidth = parseFloat($("#plannerSwathWidth").val()) || 10;
+    var turningRadius = parseFloat($("#plannerTurningRadius").val());
+    if (!turningRadius || turningRadius <= 0) turningRadius = swathWidth / 2;
+    var angle = parseFloat($("#plannerAngle").val()) || 0;
+    var result = $(this).data("result");
+    
+    if (!result) return;
+    var props = result.features[0].properties;
+    
+    $("#plannerSaveBtn").prop("disabled", true).text("Saving...");
+    
+    fetch("/api/geozones/" + zoneId + "/tasks", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            name: name,
+            swath_width: swathWidth,
+            angle: angle,
+            path_geojson: JSON.stringify(result),
+            total_length_m: props.total_length_m,
+            num_swaths: props.num_swaths
+        })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+        $("#plannerSaveBtn").prop("disabled", false).text("Save Task");
+        if (res.error) {
+            alert("Error: " + res.error);
+            return;
+        }
+        loadPlannerTasks(zoneId);
+        $("#plannerInfo").html('<span style="color:green;">Task saved!</span>');
+        // Keep the path visible
+    })
+    .catch(function(e) {
+        $("#plannerSaveBtn").prop("disabled", false).text("Save Task");
+        alert("Save failed: " + e.message);
+    });
+});
+
+function loadPlannerTasks(zoneId) {
+    if (!zoneId) return;
+    fetch("/api/geozones/" + zoneId + "/tasks")
+        .then(function(r) { return r.json(); })
+        .then(function(tasks) {
+            var html = "";
+            if (tasks.length === 0) {
+                html = '<div class="text-muted">No saved tasks</div>';
+            } else {
+                html = '<div class="font-weight-bold small mt-1">Saved Tasks:</div>';
+                tasks.forEach(function(t) {
+                    var d = new Date(t.created * 1000);
+                    html += '<div class="task-item" style="padding:3px 0;border-bottom:1px solid #eee;cursor:pointer;" onclick="showTaskOnMap(' + t.id + ')">';
+                    html += escapeHtml(t.name);
+                    html += '<span style="float:right;color:#dc3545;cursor:pointer;font-weight:bold;" onclick="event.stopPropagation();deletePlannerTask(' + t.id + ')">&times;</span>';
+                    html += '<br><small class="text-muted">' + t.swath_width + 'm, ' + t.angle + 'deg, ' + t.total_length_m + 'm</small>';
+                    html += '</div>';
+                });
+            }
+            $("#plannerSavedTasks").html(html);
+        });
+}
+
+function showTaskOnMap(taskId) {
+    var zoneId = $("#plannerZoneId").val();
+    fetch("/api/geozones/" + zoneId + "/tasks/" + taskId + "/path")
+        .then(function(r) { return r.json(); })
+        .then(function(geojson) {
+            if (!geojson || geojson.error) return;
+            showPlannerPreview(geojson);
+        });
+}
+
+function deletePlannerTask(taskId) {
+    if (!confirm("Delete this task?")) return;
+    fetch("/api/tasks/" + taskId, {method: "DELETE"})
+        .then(function() {
+            loadPlannerTasks($("#plannerZoneId").val());
+            if ($("#plannerSavedTasks").children().length <= 1) {
+                clearPlannerPreview();
+            }
+        });
+}
+
+// === Pick 2 Points Mode ===
+var plannerPickMarkers = [];
+var plannerPickLine = null;
+var plannerPickActive = false;
+var plannerPickStep = 0; // 0=idle, 1=waiting first, 2=waiting second
+
+function exitPickMode() {
+    plannerPickActive = false;
+    plannerPickStep = 0;
+    $("#plannerPickInfo").hide();
+    $("#plannerPickBtn").text("Pick 2 Points on Map").removeClass("btn-danger").addClass("btn-outline-info");
+    // Remove markers and line
+    plannerPickMarkers.forEach(function(m) { map.removeLayer(m); });
+    plannerPickMarkers = [];
+    if (plannerPickLine) { map.removeLayer(plannerPickLine); plannerPickLine = null; }
+    map.off("click", onPlannerMapClick);
+    map.getContainer().style.cursor = "";
+}
+
+function onPlannerMapClick(e) {
+    if (!plannerPickActive) return;
+    var zoneId = $("#plannerZoneId").val();
+    if (!zoneId) return;
+    
+    var latlng = e.latlng;
+    
+    // Snap to boundary
+    fetch("/api/geozones/" + zoneId + "/snap_point", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({lat: latlng.lat, lon: latlng.lng})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(res) {
+        if (!res || res.error) {
+            addPickPoint(latlng);
+            return;
+        }
+        var pt = res.snapped ? L.latLng(res.lat, res.lon) : latlng;
+        if (res.snapped) {
+            addPickPoint(pt);
+        } else {
+            addPickPoint(pt);
+        }
+    });
+}
+
+function addPickPoint(latlng) {
+    if (!plannerPickActive) return;
+    plannerPickStep++;
+    
+    var marker = L.circleMarker(latlng, {
+        radius: 6,
+        color: "#e74c3c",
+        fillColor: "#fff",
+        fillOpacity: 1,
+        weight: 2
+    }).addTo(map);
+    plannerPickMarkers.push(marker);
+    
+    // Draw line between points if we have 2
+    if (plannerPickStep === 2) {
+        var p1 = plannerPickMarkers[0].getLatLng();
+        var p2 = plannerPickMarkers[1].getLatLng();
+        
+        plannerPickLine = L.polyline([p1, p2], {
+            color: "#e67e22",
+            weight: 3,
+            dashArray: "5,5",
+            opacity: 0.8
+        }).addTo(map);
+        
+        // Calculate angle
+        var angle = calculateAngle(p1, p2);
+        $("#plannerAngle").val(Math.round(angle));
+        
+        // Auto-generate
+        $("#plannerPickInfo").html("Angle: " + Math.round(angle) + " deg. Generating path...");
+        exitPickMode();
+        $("#plannerGenerateBtn").click();
+    } else {
+        $("#plannerPickInfo").html("Point " + plannerPickStep + " set. Click second point on map.");
+    }
+}
+
+function calculateAngle(p1, p2) {
+    // Returns angle in degrees (0=north, 90=east) from p1 to p2
+    var dx = p2.lng - p1.lng;
+    var dy = p2.lat - p1.lat;
+    // Convert to meters (approximate)
+    var rlat = (p1.lat + p2.lat) / 2 * Math.PI / 180;
+    var mx = dx * 111320 * Math.cos(rlat);
+    var my = dy * 111320;
+    // Angle from north, clockwise
+    var angle = Math.atan2(mx, my) * 180 / Math.PI;
+    if (angle < 0) angle += 360;
+    if (angle >= 180) angle -= 180;
+    return angle;
+}
+
+$("#plannerPickBtn").click(function() {
+    if (plannerPickActive) {
+        exitPickMode();
+        return;
+    }
+    var zoneId = $("#plannerZoneId").val();
+    if (!zoneId) return;
+    
+    // Clear previous preview
+    clearPlannerPreview();
+    $("#plannerInfo").hide();
+    $("#plannerSaveBtn").hide();
+    
+    plannerPickActive = true;
+    plannerPickStep = 0;
+    plannerPickMarkers = [];
+    if (plannerPickLine) { map.removeLayer(plannerPickLine); plannerPickLine = null; }
+    
+    $(this).text("Cancel Pick").removeClass("btn-outline-info").addClass("btn-danger");
+    $("#plannerPickInfo").html("Click first point on map (near geozone boundary for snap).").show();
+    
+    map.on("click", onPlannerMapClick);
+    map.getContainer().style.cursor = "crosshair";
+});
+
+// Clean up pick mode when closing planner
+var origCloseTaskPlanner = closeTaskPlanner;
+closeTaskPlanner = function() {
+    if (plannerPickActive) exitPickMode();
+    origCloseTaskPlanner();
+};
+
+// "Create Task" button opens sidebar planner
+$("#createTaskBtn").click(function() {
+    var zoneId = $("#editGeozoneModal").data("zone-id");
+    if (!zoneId) return;
+    openTaskPlanner(zoneId);
+});
+
+// Clean up planner on Edit Geozone close
+$("#editGeozoneModal").on("hidden.bs.modal", function() {
+    if (!taskPlannerActive) return;
+    // Don't close planner when modal hides, it was hidden by openTaskPlanner
+});
