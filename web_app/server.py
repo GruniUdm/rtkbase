@@ -330,8 +330,20 @@ def _get_weather():
 
 
 # -------- Weather history (Open-Meteo archive, free, no key) --------
-WEATHER_HISTORY_LAT = 56.502622037
-WEATHER_HISTORY_LON = 52.477563438
+_weather_pos_cache = {}
+
+
+def _weather_position():
+    """Weather location from the settings.conf base position (no hardcoded coordinates)."""
+    if 'pos' not in _weather_pos_cache:
+        try:
+            pos = rtkbaseconfig.get("main", "position").replace("'", "").split()
+            _weather_pos_cache['pos'] = (float(pos[0]), float(pos[1]))
+        except Exception:
+            _weather_pos_cache['pos'] = (0.0, 0.0)
+    return _weather_pos_cache['pos']
+
+
 WEATHER_HISTORY_TZ = 'Europe/Moscow'
 WEATHER_HISTORY_SOURCE = 'openmeteo'
 _weather_history_lock = Lock()
@@ -379,11 +391,12 @@ def _weather_upsert(days):
 
 def _fetch_openmeteo_history(start_date, end_date):
     """Fetch daily aggregates for [start_date, end_date] from the archive API."""
+    lat, lon = _weather_position()
     url = (
         'https://archive-api.open-meteo.com/v1/archive'
         '?latitude=%s&longitude=%s&start_date=%s&end_date=%s'
         '&daily=precipitation_sum,temperature_2m_max,temperature_2m_min,temperature_2m_mean'
-        '&timezone=%s' % (WEATHER_HISTORY_LAT, WEATHER_HISTORY_LON, start_date, end_date, WEATHER_HISTORY_TZ)
+        '&timezone=%s' % (lat, lon, start_date, end_date, WEATHER_HISTORY_TZ)
     )
     r = requests.get(url, timeout=25)
     r.raise_for_status()
@@ -392,11 +405,12 @@ def _fetch_openmeteo_history(start_date, end_date):
 
 def _fetch_recent_days():
     """Fill the last few days (archive lags) from the forecast API."""
+    lat, lon = _weather_position()
     url = (
         'https://api.open-meteo.com/v1/forecast'
         '?latitude=%s&longitude=%s&past_days=6&forecast_days=1'
         '&daily=precipitation_sum,temperature_2m_max,temperature_2m_min,temperature_2m_mean'
-        '&timezone=%s' % (WEATHER_HISTORY_LAT, WEATHER_HISTORY_LON, WEATHER_HISTORY_TZ)
+        '&timezone=%s' % (lat, lon, WEATHER_HISTORY_TZ)
     )
     r = requests.get(url, timeout=25)
     r.raise_for_status()
@@ -496,9 +510,10 @@ def _build_history_summary(year=None):
         'temp_mean_month': monthly_out[cur_month - 1]['temp_mean'],
         'temp_mean_month_label': months_ru[cur_month],
     }
+    lat, lon = _weather_position()
     return {
         'year': year,
-        'location': {'lat': WEATHER_HISTORY_LAT, 'lon': WEATHER_HISTORY_LON, 'name': 'Новая Бия'},
+        'location': {'lat': lat, 'lon': lon, 'name': ''},
         'daily': daily,
         'monthly': monthly_out,
         'summary': summary,
@@ -1092,6 +1107,8 @@ def tractor_ips():
 @login_required
 def tractor_track(ip):
     ensure_migrated()
+    from_ts = request.args.get('from', type=int)
+    to_ts = request.args.get('to', type=int)
     points = gpkg_helper.get_track(_db, ip)
     if not points or not isinstance(points, list):
         points = []
@@ -1106,6 +1123,10 @@ def tractor_track(ip):
                         'q': int(row.get('quality', 0)), 's': int(row.get('satellites', 0)),
                         'h': float(row.get('hdop', 0)), 'alt': float(row.get('altitude', 0))
                     })
+    if from_ts is not None or to_ts is not None:
+        points = [p for p in points
+                  if (from_ts is None or p.get('t', 0) >= from_ts) and
+                     (to_ts is None or p.get('t', 0) <= to_ts)]
     return json.dumps(points)
 
 @app.route('/api/tractor_track/<ip>/last_session')
@@ -1533,8 +1554,8 @@ def _scan_field_alerts(window_hours=48):
                 'VALUES (?,?,?,?,?,?,?,?,?,?,?) '
                 'ON CONFLICT(zone_id, tractor_ip, alert_date) DO UPDATE SET '
                 'last_seen=excluded.last_seen, first_seen=MIN(field_alerts.first_seen, excluded.first_seen), '
-                'points=excluded.points, distance_km=excluded.distance_km, status=?, updated=excluded.updated',
-                (zid, zname, ip, d, t0, last, cnt, round(dist, 2), 'pending', now, now, 'pending'))
+                'points=excluded.points, distance_km=excluded.distance_km, updated=excluded.updated',
+                (zid, zname, ip, d, t0, last, cnt, round(dist, 2), 'pending', now, now))
             made.append((zid, zname, ip, d))
         i = j + 1
     _db.commit()

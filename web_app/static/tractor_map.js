@@ -567,6 +567,8 @@ function openGeozonePanel(id) {
 function closeGeozonePanel() {
     var lastId = currentZoneId;
     currentZoneId = null;
+    _pendingAlertId = null;
+    _pendingAlertIp = null;
     if (lastId) hideNdviOverlay(lastId);
     var p = document.getElementById('geozonePanel');
     if (p) p.style.display = 'none';
@@ -673,8 +675,8 @@ function renderAlerts(data) {
         html += '<div><b>' + escapeHtml(a.zone_name || a.zone_id) + '</b> · ' + escapeHtml(a.tractor_ip) + '</div>';
         html += '<div style="color:#666;font-size:0.8em;">' + escapeHtml(a.alert_date) + ' ' + _fmtTime(a.first_seen) + '–' + _fmtTime(a.last_seen) + ' · ' + a.points + ' точек' + (a.distance_km ? ' · ' + a.distance_km + ' км' : '') + '</div>';
         html += '<div style="margin-top:3px;">';
-        html += '<button class="btn btn-xs btn-outline-info" onclick="showAlertOnMap(\'' + a.zone_id + '\',\'' + a.tractor_ip + '\')" style="font-size:0.75em;padding:0 6px;">Показать</button> ';
-        html += '<button class="btn btn-xs btn-success" onclick="processAlert(' + a.id + ')" style="font-size:0.75em;padding:0 6px;">Обработать</button>';
+        html += '<button class="btn btn-xs btn-outline-info" onclick="showAlertOnMap(\'' + a.zone_id + '\',\'' + a.tractor_ip + '\',' + a.first_seen + ',' + a.last_seen + ')" style="font-size:0.75em;padding:0 6px;">Показать</button> ';
+        html += '<button class="btn btn-xs btn-success" onclick="openAlertWork(' + a.id + ',\'' + a.zone_id + '\',' + a.first_seen + ',' + a.last_seen + ',\'' + a.tractor_ip + '\')" style="font-size:0.75em;padding:0 6px;">Обработать</button>';
         html += '</div></div>';
     });
     if (processed.length) {
@@ -697,7 +699,33 @@ function processAlert(alertId) {
         .catch(function(e) { alert('Не удалось обработать: ' + e.message); });
 }
 
-function showAlertOnMap(zoneId, ip) {
+var _pendingAlertId = null;
+var _pendingAlertIp = null;
+
+function openAlertWork(alertId, zoneId, firstSeen, lastSeen, ip) {
+    _pendingAlertId = alertId;
+    _pendingAlertIp = ip || null;
+    if (!zoneId || !geozoneLayers[zoneId]) {
+        alert('Поле не найдено на карте');
+        return;
+    }
+    editGeozone(zoneId);
+    setTimeout(function() {
+        var d = new Date((lastSeen || firstSeen || Date.now() / 1000) * 1000);
+        var dateEl = document.getElementById('opDate');
+        if (dateEl) dateEl.value = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+        if (ip) {
+            var machEl = document.getElementById('opMachinery');
+            if (machEl) machEl.value = ip;
+        }
+        var f = document.getElementById('addOpForm');
+        if (f && f.style.display !== 'block') f.style.display = 'block';
+        var ops = document.getElementById('gpOpsBody');
+        if (ops) ops.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }, 120);
+}
+
+function showAlertOnMap(zoneId, ip, fromTs, toTs) {
     var m = document.getElementById('map');
     var w = document.getElementById('weatherHistoryPanel');
     var p = document.getElementById('geozonePanel');
@@ -708,7 +736,40 @@ function showAlertOnMap(zoneId, ip) {
     currentZoneId = null;
     if (map) setTimeout(function() { map.invalidateSize(); }, 60);
     if (zoneId && geozoneLayers[zoneId]) focusGeozone(zoneId);
-    if (ip) loadAndShowTrack(ip);
+    if (ip) loadAlertSessionTrack(ip, fromTs, toTs);
+}
+
+function loadAlertSessionTrack(ip, fromTs, toTs) {
+    var url = '/api/tractor_track/' + encodeURIComponent(ip);
+    if (fromTs || toTs) {
+        url += '?' + (fromTs ? 'from=' + fromTs : '') + (fromTs && toTs ? '&' : '') + (toTs ? 'to=' + toTs : '');
+    }
+    fetch(url)
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function(points) {
+            if (!points || points.length < 2) {
+                alert('Нет трека за эту сессию');
+                return;
+            }
+            if (tractorTracks[ip]) {
+                map.removeLayer(tractorTracks[ip]);
+                delete tractorTracks[ip];
+            }
+            var latlngs = points.map(function(p) { return [p.lat, p.lon]; });
+            var polyline = L.polyline(latlngs, {
+                color: '#3498db',
+                weight: 3,
+                opacity: 0.8
+            }).addTo(map);
+            polyline.bindTooltip(ip + ' · ' + _fmtTime(fromTs) + '–' + _fmtTime(toTs), {sticky: true});
+            tractorTracks[ip] = polyline;
+            polyline._hide = false;
+            map.fitBounds(polyline.getBounds().pad(0.1));
+        })
+        .catch(function(e) { alert('Не удалось загрузить трек: ' + e.message); });
 }
 
 // -------- Урожайность (сводка) --------
@@ -820,6 +881,14 @@ function saveFieldOp() {
         document.getElementById('opType').value = '';
         toggleAddOpForm();
         loadFieldOps(zoneId);
+        if (_pendingAlertId) {
+            var pid = _pendingAlertId;
+            _pendingAlertId = null;
+            _pendingAlertIp = null;
+            fetch('/api/alerts/' + pid + '/process', {method: 'POST'})
+                .then(function() { scanAlerts(); })
+                .catch(function() {});
+        }
     })
     .catch(function(e) { alert('Не удалось сохранить: ' + e.message); });
 }
