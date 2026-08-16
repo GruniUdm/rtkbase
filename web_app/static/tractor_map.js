@@ -668,7 +668,7 @@ function renderAlerts(data) {
     }
     if (!list) return;
     var html = '';
-    if (!pending.length && !processed.length) {
+    if (!pending.length) {
         html = '<span class="text-muted">Список пуст</span>';
     }
     pending.forEach(function(a) {
@@ -680,14 +680,6 @@ function renderAlerts(data) {
         html += '<button class="btn btn-xs btn-success" data-keep-panel="1" onclick="openAlertWork(' + a.id + ',\'' + a.zone_id + '\',' + a.first_seen + ',' + a.last_seen + ',\'' + a.tractor_ip + '\')" style="font-size:0.75em;padding:0 6px;">Обработать</button>';
         html += '</div></div>';
     });
-    if (processed.length) {
-        html += '<div style="font-weight:600;margin:6px 0 2px;">Обработанные</div>';
-        processed.forEach(function(a) {
-            html += '<div style="padding:3px 4px;color:#888;font-size:0.85em;border-bottom:1px solid #eee;">';
-            html += '<span style="text-decoration:line-through;">' + escapeHtml(a.zone_name || a.zone_id) + '</span> · ' + escapeHtml(a.tractor_ip) + ' · ' + escapeHtml(a.alert_date) + ' ' + _fmtTime(a.last_seen);
-            html += '</div>';
-        });
-    }
     list.innerHTML = html;
 }
 
