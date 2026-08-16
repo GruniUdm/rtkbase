@@ -706,6 +706,10 @@ var _pendingAlertIp = null;
 function openAlertWork(alertId, zoneId, firstSeen, lastSeen, ip) {
     _pendingAlertId = alertId;
     _pendingAlertIp = ip || null;
+    fetch('/api/alerts/' + alertId + '/process', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(res) { if (res.ok) scanAlerts(); })
+        .catch(function() {});
     if (!zoneId || !geozoneLayers[zoneId]) {
         alert('Поле не найдено на карте');
         return;
