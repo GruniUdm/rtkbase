@@ -580,6 +580,7 @@ function closeGeozonePanel() {
 }
 
 $(document).on('click', '#leftPanel .card-header, #leftPanel button, #leftPanel .btn', function() {
+    if ($(this).attr('data-keep-panel') === '1') return;
     var p = document.getElementById('geozonePanel');
     if (p && p.style.display !== 'none') closeGeozonePanel();
 });
@@ -676,7 +677,7 @@ function renderAlerts(data) {
         html += '<div style="color:#666;font-size:0.8em;">' + escapeHtml(a.alert_date) + ' ' + _fmtTime(a.first_seen) + '–' + _fmtTime(a.last_seen) + ' · ' + a.points + ' точек' + (a.distance_km ? ' · ' + a.distance_km + ' км' : '') + '</div>';
         html += '<div style="margin-top:3px;">';
         html += '<button class="btn btn-xs btn-outline-info" onclick="showAlertOnMap(\'' + a.zone_id + '\',\'' + a.tractor_ip + '\',' + a.first_seen + ',' + a.last_seen + ')" style="font-size:0.75em;padding:0 6px;">Показать</button> ';
-        html += '<button class="btn btn-xs btn-success" onclick="openAlertWork(' + a.id + ',\'' + a.zone_id + '\',' + a.first_seen + ',' + a.last_seen + ',\'' + a.tractor_ip + '\')" style="font-size:0.75em;padding:0 6px;">Обработать</button>';
+        html += '<button class="btn btn-xs btn-success" data-keep-panel="1" onclick="openAlertWork(' + a.id + ',\'' + a.zone_id + '\',' + a.first_seen + ',' + a.last_seen + ',\'' + a.tractor_ip + '\')" style="font-size:0.75em;padding:0 6px;">Обработать</button>';
         html += '</div></div>';
     });
     if (processed.length) {
