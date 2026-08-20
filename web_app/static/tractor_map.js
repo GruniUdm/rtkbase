@@ -16,6 +16,8 @@ var fieldPreview = null;
 var _fieldPreviewSeq = 0;
 var _savedDetailVisibility = {};
 var fieldPreviewSectionLoading = false;
+var fieldPreviewYieldLoading = false;
+var yieldColorMode = 'gradient';
 var _fieldFileClickTimer = null;
 var drawMode = false;
 var drawPoints = [];
@@ -3044,7 +3046,7 @@ function renderFieldFileList() {
     el.innerHTML = html;
 }
 
-var _fieldPreviewDetailLabels = {'tracks': 'Треки', 'headland': 'Гон', 'sections': 'Секции', 'abLine': 'AB линии'};
+var _fieldPreviewDetailLabels = {'tracks': 'Треки', 'headland': 'Гон', 'sections': 'Секции', 'abLine': 'AB линии', 'yield': 'Урожайность'};
 
 function fieldPreviewControlsHtml() {
     var types = ['tracks', 'headland', 'sections', 'abLine'];
@@ -3057,6 +3059,15 @@ function fieldPreviewControlsHtml() {
         var label = _fieldPreviewDetailLabels[t] || t;
         html += '<label style="display:inline-block;margin-right:8px;cursor:pointer;font-weight:400;margin-bottom:2px;">' +
             '<input type="checkbox"' + cb + ' onchange="toggleFieldPreviewDetail(\'' + t + '\')" style="vertical-align:middle;margin-right:2px;"> ' + label + '</label>';
+    }
+    if (fieldPreview && fieldPreview.layers.yield) {
+        var yOn = map.hasLayer(fieldPreview.layers.yield);
+        html += '<label style="display:inline-block;margin-right:8px;cursor:pointer;font-weight:400;margin-bottom:2px;">' +
+            '<input type="checkbox"' + (yOn ? ' checked' : '') + ' onchange="toggleFieldPreviewDetail(\'yield\')" style="vertical-align:middle;margin-right:2px;"> Урожайность</label>';
+        html += '<span style="margin-left:4px;font-size:0.85em;">';
+        html += '<label style="font-weight:400;margin-right:4px;cursor:pointer;"><input type="radio" name="yieldColorMode" value="aog"' + (yieldColorMode === 'aog' ? ' checked' : '') + ' onchange="setYieldColorMode(\'aog\')"> AOG</label>';
+        html += '<label style="font-weight:400;cursor:pointer;"><input type="radio" name="yieldColorMode" value="gradient"' + (yieldColorMode === 'gradient' ? ' checked' : '') + ' onchange="setYieldColorMode(\'gradient\')"> Градиент</label>';
+        html += '</span>';
     }
     return html;
 }
@@ -3164,6 +3175,7 @@ function showFieldOnMap(name) {
             showFieldPreviewBar(data.name);
             renderFieldFileList();
             loadFieldPreviewSections(name, seq);
+            loadFieldPreviewYield(name, seq);
         })
         .catch(function(e) {
             console.error('Field preview error:', e);
@@ -3175,6 +3187,7 @@ function closeFieldPreview() {
     _fieldPreviewSeq++;
     if (previewABActive) exitPreviewAB();
     closeFieldPreviewLayers();
+    _updateYieldLegend();
     showAllGeozoneLayers();
     hideFieldPreviewBar();
     renderFieldFileList();
@@ -3367,6 +3380,7 @@ function toggleFieldPreviewDetail(type) {
     } else {
         map.addLayer(layer);
     }
+    if (type === 'yield') _updateYieldLegend();
     renderFieldFileList();
 }
 
@@ -3375,9 +3389,12 @@ function showFieldPreviewBar(name) {
     if (!bar) return;
     document.getElementById('fieldPreviewName').textContent = name;
     document.getElementById('fieldPreviewSectionsStatus').textContent = '';
+    var yieldEl = document.getElementById('fieldPreviewYieldStatus');
+    if (yieldEl) { yieldEl.textContent = ''; yieldEl.style.color = '#888'; yieldEl.style.display = 'none'; }
     document.getElementById('previewABControls').style.display = '';
     document.getElementById('previewABHint').style.display = 'none';
     document.getElementById('previewABBtn').disabled = false;
+    _yieldPolyCache = [];
     bar.style.display = 'block';
 }
 
@@ -3523,6 +3540,168 @@ function fetchSectionsStream(name, seq) {
             fieldPreviewSectionLoading = false;
             showSectionsLoading(false);
             showSectionsError();
+        });
+}
+
+// -------- Yield data preview --------
+
+var _yieldPolyCache = [];
+
+function showYieldLoading(show) {
+    var el = document.getElementById('fieldPreviewYieldStatus');
+    if (el) el.style.display = show ? 'inline' : 'none';
+}
+
+function showYieldError() {
+    var el = document.getElementById('fieldPreviewYieldStatus');
+    if (el) { el.textContent = 'Ошибка загрузки урожайности'; el.style.color = '#dc3545'; el.style.display = 'inline'; }
+}
+
+function setYieldColorMode(mode) {
+    yieldColorMode = mode;
+    _renderYieldCache();
+    _updateYieldLegend();
+    renderFieldFileList();
+}
+
+function _updateYieldLegend() {
+    var el = document.getElementById('yieldLegend');
+    if (!el) return;
+    var visible = fieldPreview && fieldPreview.layers.yield && map.hasLayer(fieldPreview.layers.yield);
+    el.style.display = visible ? 'block' : 'none';
+}
+
+function _renderYieldCache() {
+    if (!fieldPreview || !fieldPreview.layers.yield) return;
+    fieldPreview.layers.yield.clearLayers();
+    for (var i = 0; i < _yieldPolyCache.length; i++) {
+        var item = _yieldPolyCache[i];
+        var ring = item.ring[0];
+        var ll = [];
+        for (var k = 0; k < ring.length; k++) {
+            ll.push([ring[k][1], ring[k][0]]);
+        }
+        var c = yieldColorMode === 'gradient' ? item.color_gradient : item.color_aog;
+        c = c || '#27ae60';
+        var opts = {color: c, weight: 0, fillOpacity: 0.4, fillColor: c};
+        L.polygon([ll], opts).addTo(fieldPreview.layers.yield);
+    }
+}
+
+function loadFieldPreviewYield(name, seq) {
+    fieldPreviewYieldLoading = true;
+    showYieldLoading(true);
+    var statusEl = document.getElementById('fieldPreviewYieldStatus');
+    if (statusEl) {
+        statusEl.textContent = 'Загрузка урожайности...';
+        statusEl.style.color = '#888';
+    }
+
+    function checkStatus() {
+        if (_fieldPreviewSeq !== seq) return;
+        fetch('/api/fields/' + encodeURIComponent(name) + '/yield/status')
+            .then(function(r) { return r.json(); })
+            .then(function(s) {
+                if (_fieldPreviewSeq !== seq) return;
+                if (s.state === 'ready') {
+                    fetchYieldStream(name, seq);
+                } else if (s.state === 'processing') {
+                    setTimeout(checkStatus, 1500);
+                } else if (s.state === 'empty') {
+                    fieldPreviewYieldLoading = false;
+                    showYieldLoading(false);
+                    var el = document.getElementById('fieldPreviewYieldStatus');
+                    if (el) { el.style.display = 'none'; }
+                } else {
+                    throw new Error('yield status: ' + (s.error || s.state));
+                }
+            })
+            .catch(function(e) {
+                console.error('yield status error:', e);
+                if (_fieldPreviewSeq !== seq) return;
+                fieldPreviewYieldLoading = false;
+                showYieldLoading(false);
+                showYieldError();
+            });
+    }
+    checkStatus();
+}
+
+function fetchYieldStream(name, seq) {
+    _yieldPolyCache = [];
+    fetch('/api/fields/' + encodeURIComponent(name) + '/yield')
+        .then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            var reader = res.body.getReader();
+            var decoder = new TextDecoder();
+            var buf = '';
+            var first = true;
+
+            function ensureContainer() {
+                if (!fieldPreview || fieldPreview.name !== name || _fieldPreviewSeq !== seq) return null;
+                if (!fieldPreview.layers.yield) {
+                    var grp = L.layerGroup();
+                    grp.addTo(fieldPreview.group);
+                    fieldPreview.layers.yield = grp;
+                }
+                return fieldPreview.layers.yield;
+            }
+
+            function flush() {
+                if (_yieldPolyCache.length === 0) return;
+                var container = ensureContainer();
+                if (container) {
+                    _renderYieldCache();
+                }
+            }
+
+            function finish() {
+                fieldPreviewYieldLoading = false;
+                showYieldLoading(false);
+                _updateYieldLegend();
+                renderFieldFileList();
+            }
+
+            function pump() {
+                return reader.read().then(function(res2) {
+                    if (res2.done) {
+                        if (buf.trim()) {
+                            try { _yieldPolyCache.push(JSON.parse(buf)); } catch(e) {}
+                        }
+                        flush();
+                        finish();
+                        return;
+                    }
+                    buf += decoder.decode(res2.value, {stream: true});
+                    var lines = buf.split('\n');
+                    buf = lines.pop();
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i].trim();
+                        if (!line) continue;
+                        try {
+                            var obj = JSON.parse(line);
+                            if (first) {
+                                first = false;
+                                continue;
+                            }
+                            _yieldPolyCache.push(obj);
+                        } catch(e) {}
+                    }
+                    if (_yieldPolyCache.length % 200 === 0 && _yieldPolyCache.length > 0) {
+                        flush();
+                    }
+                    return pump();
+                });
+            }
+
+            return pump();
+        })
+        .catch(function(e) {
+            console.error('yield stream error:', e);
+            if (_fieldPreviewSeq !== seq) return;
+            fieldPreviewYieldLoading = false;
+            showYieldLoading(false);
+            showYieldError();
         });
 }
 

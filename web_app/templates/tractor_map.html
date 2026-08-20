@@ -362,6 +362,7 @@
             <div id="fieldPreviewBar" style="display:none;position:absolute;top:10px;right:52px;z-index:1000;background:rgba(255,255,255,0.95);border:1px solid #ccc;border-radius:4px;padding:6px 10px;font-size:0.85em;box-shadow:0 1px 4px rgba(0,0,0,.2);">
                 <b>Просмотр:</b> <span id="fieldPreviewName"></span>
                 <span id="fieldPreviewSectionsStatus" style="color:#888;display:none;">Загрузка секций...</span>
+                <span id="fieldPreviewYieldStatus" style="color:#888;display:none;">Загрузка урожайности...</span>
                 <span id="previewABControls" style="margin-left:10px;display:none;">
                     <label style="font-weight:400;margin-right:4px;cursor:pointer;"><input type="radio" name="previewLineType" value="ab" checked onchange="onPreviewLineTypeChange()"> Прямая</label>
                     <label style="font-weight:400;margin-right:8px;cursor:pointer;"><input type="radio" name="previewLineType" value="curve" onchange="onPreviewLineTypeChange()"> Кривая</label>
@@ -372,9 +373,15 @@
                 <span id="previewABHint" style="color:#888;display:none;margin-left:8px;"></span>
                 <button type="button" onclick="closeFieldPreview()" title="Закрыть просмотр" style="margin-left:8px;border:none;background:none;font-size:1.1em;cursor:pointer;color:#dc3545;line-height:1;">&times;</button>
             </div>
+            <div id="yieldLegend" style="display:none;position:absolute;bottom:40px;right:10px;z-index:1000;background:rgba(255,255,255,0.95);border:1px solid #ccc;border-radius:4px;padding:6px 10px;font-size:0.8em;box-shadow:0 1px 4px rgba(0,0,0,.2);">
+                <div style="font-weight:600;margin-bottom:4px;">Урожайность, ц/га</div>
+                <div style="display:flex;align-items:center;margin-bottom:2px;"><span style="display:inline-block;width:18px;height:12px;background:#e74c3c;margin-right:6px;border:1px solid #ccc;"></span> &lt; 10</div>
+                <div style="display:flex;align-items:center;margin-bottom:2px;"><span style="display:inline-block;width:18px;height:12px;background:#e67e22;margin-right:6px;border:1px solid #ccc;"></span> 10 – 20</div>
+                <div style="display:flex;align-items:center;margin-bottom:2px;"><span style="display:inline-block;width:18px;height:12px;background:#f1c40f;margin-right:6px;border:1px solid #ccc;"></span> 20 – 30</div>
+                <div style="display:flex;align-items:center;margin-bottom:2px;"><span style="display:inline-block;width:18px;height:12px;background:#2ecc71;margin-right:6px;border:1px solid #ccc;"></span> 30 – 40</div>
+                <div style="display:flex;align-items:center;"><span style="display:inline-block;width:18px;height:12px;background:#1a7a3a;margin-right:6px;border:1px solid #ccc;"></span> &gt; 40</div>
+            </div>
         </div>
-    </div>
-</div>
 
 <!-- Field File Modals -->
 <div class="modal" id="fieldFileModal" tabindex="-1">

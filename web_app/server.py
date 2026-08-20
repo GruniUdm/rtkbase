@@ -3027,6 +3027,115 @@ def field_sections_content(name):
 
     return Response(stream_with_context(generate()), mimetype='application/json')
 
+
+#### Yield data preview ####
+
+_YIELD_JOBS = {}
+
+
+def _field_yield_path(name):
+    import hashlib
+    h = hashlib.sha1(name.encode('utf-8')).hexdigest()[:16]
+    return os.path.join(_SECTIONS_CACHE_DIR, 'field_yield_%s.json' % h)
+
+
+def _start_yield_worker(name, path):
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yield_worker.py')
+    try:
+        proc = subprocess.Popen([sys.executable, worker, name, path],
+                                start_new_session=True,
+                                stdout=open('/tmp/yield_worker.log', 'a'),
+                                stderr=subprocess.STDOUT)
+        _YIELD_JOBS[name] = proc.pid
+        print('yield_worker started for', name, 'pid', proc.pid)
+    except Exception as e:
+        print('Failed to start yield worker:', e)
+
+
+def _yield_worker_alive(name):
+    pid = _YIELD_JOBS.get(name)
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+@app.route('/api/fields/<name>/yield/status', methods=['GET'])
+@login_required
+def field_yield_status(name):
+    data = _get_field_data(name)
+    if not data:
+        return jsonify({'error': 'field not found'}), 404
+
+    yield_data = data.get('yieldData')
+    records = yield_data.get('records') if yield_data else None
+    if not records:
+        return jsonify({'state': 'empty'})
+
+    updated = _field_updated(name)
+    path = _field_yield_path(name)
+
+    if name in _YIELD_JOBS and not _yield_worker_alive(name):
+        del _YIELD_JOBS[name]
+
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                header = json.loads(f.readline())
+            if header.get('updated') == updated and header.get('version') == 1:
+                _YIELD_JOBS.pop(name, None)
+                return jsonify({'state': 'ready', 'total': header.get('total', 0),
+                                'yield_min': header.get('yield_min', 0),
+                                'yield_max': header.get('yield_max', 0)})
+        except Exception:
+            pass
+
+    if name in _YIELD_JOBS:
+        return jsonify({'state': 'processing'})
+
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    _start_yield_worker(name, path)
+    return jsonify({'state': 'processing'})
+
+
+@app.route('/api/fields/<name>/yield', methods=['GET'])
+@login_required
+def field_yield_content(name):
+    data = _get_field_data(name)
+    if not data:
+        return jsonify({'error': 'field not found'}), 404
+    updated = _field_updated(name)
+    path = _field_yield_path(name)
+    if not os.path.exists(path):
+        return jsonify({'error': 'not ready'}), 409
+    try:
+        with open(path) as f:
+            header = json.loads(f.readline())
+        if header.get('updated') != updated:
+            return jsonify({'error': 'stale'}), 409
+    except Exception:
+        return jsonify({'error': 'invalid cache'}), 500
+
+    def generate():
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    yield line + '\n'
+        except GeneratorExit:
+            pass
+
+    return Response(stream_with_context(generate()), mimetype='application/json')
+
+
 if __name__ == "__main__":
 
     try:
