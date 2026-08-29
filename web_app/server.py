@@ -1292,10 +1292,17 @@ def _ensure_field_ops_table():
         "fuel_l REAL,"
         "cost REAL,"
         "notes TEXT,"
+        "track_data TEXT,"
         "created INTEGER DEFAULT (strftime('%s','now')),"
         "updated INTEGER DEFAULT (strftime('%s','now'))"
         ")"
     )
+    try:
+        cols = [r[1] for r in _db.execute('PRAGMA table_info(field_ops)').fetchall()]
+        if 'track_data' not in cols:
+            _db.execute('ALTER TABLE field_ops ADD COLUMN track_data TEXT')
+    except Exception:
+        pass
     try:
         _db.execute("CREATE INDEX IF NOT EXISTS idx_field_ops_zone ON field_ops(zone_id)")
     except Exception:
@@ -1304,7 +1311,7 @@ def _ensure_field_ops_table():
 
 _FIELD_OP_COLS = ['id', 'zone_id', 'op_date', 'op_type', 'crop', 'machinery', 'operator',
                   'area_ha', 'material', 'dose', 'amount', 'fuel_l', 'cost', 'notes',
-                  'created', 'updated']
+                  'track_data', 'created', 'updated']
 
 
 def _field_op_row(r):
@@ -1315,7 +1322,8 @@ def _field_op_row(r):
 @login_required
 def list_field_ops(zone_id):
     _ensure_field_ops_table()
-    rows = _db.execute('SELECT * FROM field_ops WHERE zone_id=? ORDER BY op_date DESC, id DESC', (zone_id,)).fetchall()
+    _sel = ', '.join(_FIELD_OP_COLS)
+    rows = _db.execute(f'SELECT {_sel} FROM field_ops WHERE zone_id=? ORDER BY op_date DESC, id DESC', (zone_id,)).fetchall()
     return json.dumps([_field_op_row(r) for r in rows])
 
 
@@ -1330,14 +1338,15 @@ def create_field_op(zone_id):
     now = int(time.time())
     op_date = body.get('op_date') or time.strftime('%Y-%m-%d')
     _db.execute(
-        'INSERT INTO field_ops (zone_id, op_date, op_type, crop, machinery, operator, area_ha, material, dose, amount, fuel_l, cost, notes, created, updated) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'INSERT INTO field_ops (zone_id, op_date, op_type, crop, machinery, operator, area_ha, material, dose, amount, fuel_l, cost, notes, track_data, created, updated) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (zone_id, op_date, op_type,
          body.get('crop'), body.get('machinery'), body.get('operator'),
          body.get('area_ha'), body.get('material'), body.get('dose'), body.get('amount'),
-         body.get('fuel_l'), body.get('cost'), body.get('notes'), now, now))
+         body.get('fuel_l'), body.get('cost'), body.get('notes'), body.get('track_data'), now, now))
     _db.commit()
-    row = _db.execute('SELECT * FROM field_ops WHERE id=last_insert_rowid()').fetchone()
+    _sel = ', '.join(_FIELD_OP_COLS)
+    row = _db.execute(f'SELECT {_sel} FROM field_ops WHERE id=last_insert_rowid()').fetchone()
     return json.dumps(_field_op_row(row))
 
 
@@ -1348,14 +1357,15 @@ def update_field_op(zone_id, op_id):
     body = json.loads(request.data)
     now = int(time.time())
     _db.execute(
-        'UPDATE field_ops SET op_date=?, op_type=?, crop=?, machinery=?, operator=?, area_ha=?, material=?, dose=?, amount=?, fuel_l=?, cost=?, notes=?, updated=? '
+        'UPDATE field_ops SET op_date=?, op_type=?, crop=?, machinery=?, operator=?, area_ha=?, material=?, dose=?, amount=?, fuel_l=?, cost=?, notes=?, track_data=?, updated=? '
         'WHERE id=? AND zone_id=?',
         (body.get('op_date'), body.get('op_type'),
          body.get('crop'), body.get('machinery'), body.get('operator'),
          body.get('area_ha'), body.get('material'), body.get('dose'), body.get('amount'),
-         body.get('fuel_l'), body.get('cost'), body.get('notes'), now, op_id, zone_id))
+         body.get('fuel_l'), body.get('cost'), body.get('notes'), body.get('track_data'), now, op_id, zone_id))
     _db.commit()
-    row = _db.execute('SELECT * FROM field_ops WHERE id=? AND zone_id=?', (op_id, zone_id)).fetchone()
+    _sel = ', '.join(_FIELD_OP_COLS)
+    row = _db.execute(f'SELECT {_sel} FROM field_ops WHERE id=? AND zone_id=?', (op_id, zone_id)).fetchone()
     if not row:
         return json.dumps({'error': 'not found'}), 404
     return json.dumps(_field_op_row(row))
@@ -1590,6 +1600,15 @@ def list_field_alerts():
 def process_field_alert(alert_id):
     _ensure_field_alerts_table()
     _db.execute('UPDATE field_alerts SET status=? WHERE id=?', ('processed', alert_id))
+    _db.commit()
+    return json.dumps({'ok': True})
+
+
+@app.route('/api/alerts/<int:alert_id>', methods=['DELETE'])
+@login_required
+def delete_field_alert(alert_id):
+    _ensure_field_alerts_table()
+    _db.execute('DELETE FROM field_alerts WHERE id=?', (alert_id,))
     _db.commit()
     return json.dumps({'ok': True})
 

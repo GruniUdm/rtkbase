@@ -610,6 +610,7 @@ function closeGeozonePanel() {
     currentZoneId = null;
     _pendingAlertId = null;
     _pendingAlertIp = null;
+    _pendingAlertTrack = null;
     if (lastId) hideNdviOverlay(lastId);
     var p = document.getElementById('geozonePanel');
     if (p) p.style.display = 'none';
@@ -643,6 +644,7 @@ function gpDelete() {
 
 var _gpMiniMap = null;
 var _gpMiniPolygon = null;
+var _gpMiniTrack = null;
 
 function ensureMiniMap() {
     if (_gpMiniMap) return;
@@ -657,10 +659,19 @@ function drawMiniMap(zone) {
     if (!_gpMiniMap || !zone) return;
     _gpMiniMap.invalidateSize();
     if (_gpMiniPolygon) { _gpMiniMap.removeLayer(_gpMiniPolygon); _gpMiniPolygon = null; }
+    if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; }
     var pts = zone.points;
     if (!pts || !pts.length) return;
     _gpMiniPolygon = L.polygon(pts, {color: zone.color || '#3388ff', weight: 2, fillColor: zone.color || '#3388ff', fillOpacity: 0.15}).addTo(_gpMiniMap);
     _gpMiniMap.fitBounds(L.latLngBounds(pts).pad(0.1));
+}
+
+function drawMiniMapTrack(latlngs, color) {
+    ensureMiniMap();
+    if (!_gpMiniMap) return;
+    if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; }
+    if (!latlngs || latlngs.length < 2) return;
+    _gpMiniTrack = L.polyline(latlngs, {color: color || '#3498db', weight: 3, opacity: 0.9}).addTo(_gpMiniMap);
 }
 
 // -------- Детекция движения тракторов (список для оператора) --------
@@ -718,10 +729,19 @@ function renderAlerts(data) {
         html += '<div style="color:#666;font-size:0.8em;">' + escapeHtml(a.alert_date) + ' ' + _fmtTime(a.first_seen) + '–' + _fmtTime(a.last_seen) + ' · ' + a.points + ' точек' + (a.distance_km ? ' · ' + a.distance_km + ' км' : '') + '</div>';
         html += '<div style="margin-top:3px;">';
         html += '<button class="btn btn-xs btn-outline-info" onclick="showAlertOnMap(\'' + a.zone_id + '\',\'' + a.tractor_ip + '\',' + a.first_seen + ',' + a.last_seen + ')" style="font-size:0.75em;padding:0 6px;">Показать</button> ';
-        html += '<button class="btn btn-xs btn-success" data-keep-panel="1" onclick="openAlertWork(' + a.id + ',\'' + a.zone_id + '\',' + a.first_seen + ',' + a.last_seen + ',\'' + a.tractor_ip + '\')" style="font-size:0.75em;padding:0 6px;">Обработать</button>';
+        html += '<button class="btn btn-xs btn-success" data-keep-panel="1" onclick="openAlertWork(' + a.id + ',\'' + a.zone_id + '\',' + a.first_seen + ',' + a.last_seen + ',\'' + a.tractor_ip + '\')" style="font-size:0.75em;padding:0 6px;">Обработать</button> ';
+        html += '<button class="btn btn-xs btn-outline-danger" data-keep-panel="1" onclick="deleteAlert(' + a.id + ')" style="font-size:0.75em;padding:0 6px;">Удалить</button>';
         html += '</div></div>';
     });
     list.innerHTML = html;
+}
+
+function deleteAlert(alertId) {
+    if (!confirm('Удалить запись об обработке?')) return;
+    fetch('/api/alerts/' + alertId, {method: 'DELETE'})
+        .then(function(r) { return r.json(); })
+        .then(function() { scanAlerts(); })
+        .catch(function(e) { alert('Не удалось удалить: ' + e.message); });
 }
 
 function processAlert(alertId) {
@@ -735,10 +755,12 @@ function processAlert(alertId) {
 
 var _pendingAlertId = null;
 var _pendingAlertIp = null;
+var _pendingAlertTrack = null;
 
 function openAlertWork(alertId, zoneId, firstSeen, lastSeen, ip) {
     _pendingAlertId = alertId;
     _pendingAlertIp = ip || null;
+    _pendingAlertTrack = null;
     fetch('/api/alerts/' + alertId + '/process', {method: 'POST'})
         .then(function(r) { return r.json(); })
         .then(function(res) { if (res.ok) scanAlerts(); })
@@ -748,6 +770,9 @@ function openAlertWork(alertId, zoneId, firstSeen, lastSeen, ip) {
         return;
     }
     editGeozone(zoneId);
+    if (ip) {
+        loadAlertTrackForOp(ip, firstSeen, lastSeen);
+    }
     setTimeout(function() {
         var d = new Date((lastSeen || firstSeen || Date.now() / 1000) * 1000);
         var dateEl = document.getElementById('opDate');
@@ -761,6 +786,27 @@ function openAlertWork(alertId, zoneId, firstSeen, lastSeen, ip) {
         var ops = document.getElementById('gpOpsBody');
         if (ops) ops.scrollIntoView({behavior: 'smooth', block: 'start'});
     }, 120);
+}
+
+function loadAlertTrackForOp(ip, fromTs, toTs) {
+    var url = '/api/tractor_track/' + encodeURIComponent(ip);
+    if (fromTs || toTs) {
+        url += '?' + (fromTs ? 'from=' + fromTs : '') + (fromTs && toTs ? '&' : '') + (toTs ? 'to=' + toTs : '');
+    }
+    fetch(url)
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function(points) {
+            if (!points || points.length < 2) {
+                _pendingAlertTrack = null;
+                return;
+            }
+            _pendingAlertTrack = _simplifyTrack(points.map(function(p) { return {t: p.t, lat: p.lat, lon: p.lon}; }));
+            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }));
+        })
+        .catch(function() { _pendingAlertTrack = null; });
 }
 
 function showAlertOnMap(zoneId, ip, fromTs, toTs) {
@@ -836,6 +882,45 @@ function loadYieldSummary(zoneId) {
 
 // -------- Работы на поле (журнал операций) --------
 
+var _fieldOpsCache = {};
+
+function _simplifyTrack(points, maxPoints) {
+    if (!points) return [];
+    maxPoints = maxPoints || 800;
+    if (points.length <= maxPoints) return points;
+    var step = Math.ceil(points.length / maxPoints);
+    var out = [];
+    for (var i = 0; i < points.length; i += step) out.push(points[i]);
+    if (out.length < 2) out.push(points[points.length - 1]);
+    return out;
+}
+
+function showOpTrackOnMiniMap(opId) {
+    var zoneId = currentZoneId;
+    if (!zoneId) return;
+    var ops = _fieldOpsCache[zoneId] || [];
+    var op = null;
+    for (var i = 0; i < ops.length; i++) {
+        if (ops[i].id === opId) { op = ops[i]; break; }
+    }
+    if (!op || !op.track_data) {
+        alert('Трек для этой работы сохранён не был');
+        return;
+    }
+try {
+            var track = JSON.parse(op.track_data);
+            if (!track || track.length < 2) {
+                alert('Трек для этой работы пуст');
+                return;
+            }
+            var simplified = _simplifyTrack(track);
+            drawMiniMapTrack(simplified.map(function(p) { return [p.lat, p.lon]; }));
+            _gpMiniMap.fitBounds(L.latLngBounds(simplified.map(function(p) { return [p.lat, p.lon]; })).pad(0.1));
+        } catch (e) {
+        alert('Не удалось разобрать трек: ' + e.message);
+    }
+}
+
 function loadFieldOps(zoneId) {
     var el = document.getElementById('fieldOpsList');
     if (!el) return;
@@ -849,9 +934,9 @@ function loadFieldOps(zoneId) {
             }
             var html = '';
             ops.forEach(function(o) {
-                html += '<div class="op-item" style="padding:4px 0;border-bottom:1px solid #eee;font-size:0.88em;">';
+                html += '<div class="op-item" style="padding:4px 0;border-bottom:1px solid #eee;font-size:0.88em;" data-op-id="' + o.id + '">';
                 html += '<div style="display:flex;justify-content:space-between;">';
-                html += '<span><b>' + escapeHtml(o.op_type || '') + '</b> <span style="color:#666;">' + escapeHtml(o.op_date || '') + '</span></span>';
+                html += '<span style="cursor:pointer;" onclick="showOpTrackOnMiniMap(' + o.id + ')" title="Показать трек на миникарте"><b>' + escapeHtml(o.op_type || '') + '</b> <span style="color:#666;">' + escapeHtml(o.op_date || '') + '</span></span>';
                 html += '<span style="color:#dc3545;cursor:pointer;font-weight:bold;padding-left:6px;" title="Удалить" onclick="deleteFieldOp(' + o.id + ')">&times;</span>';
                 html += '</div>';
                 var extra = [];
@@ -869,6 +954,7 @@ function loadFieldOps(zoneId) {
                 html += '</div>';
             });
             el.innerHTML = html;
+            _fieldOpsCache[zoneId] = ops;
         })
         .catch(function() {
             el.innerHTML = '<span class="text-muted">Ошибка загрузки работ</span>';
@@ -902,7 +988,8 @@ function saveFieldOp() {
         dose: document.getElementById('opDose').value,
         fuel_l: parseFloat(document.getElementById('opFuel').value) || null,
         cost: parseFloat(document.getElementById('opCost').value) || null,
-        notes: document.getElementById('opNotes').value
+        notes: document.getElementById('opNotes').value,
+        track_data: _pendingAlertTrack ? JSON.stringify(_pendingAlertTrack) : null
     };
     fetch('/api/geozones/' + zoneId + '/ops', {
         method: 'POST',
@@ -919,6 +1006,9 @@ function saveFieldOp() {
         document.getElementById('opType').value = '';
         toggleAddOpForm();
         loadFieldOps(zoneId);
+        if (_pendingAlertTrack) {
+            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }));
+        }
         if (_pendingAlertId) {
             var pid = _pendingAlertId;
             _pendingAlertId = null;
@@ -927,6 +1017,7 @@ function saveFieldOp() {
                 .then(function() { scanAlerts(); })
                 .catch(function() {});
         }
+        _pendingAlertTrack = null;
     })
     .catch(function(e) { alert('Не удалось сохранить: ' + e.message); });
 }
