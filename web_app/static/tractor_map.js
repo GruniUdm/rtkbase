@@ -1622,6 +1622,7 @@ function showAllNdviOverlays() {
 }
 
 function hideAllNdviOverlays() {
+    _pendingNdviAdds = {};
     for (var zid in ndviOverlays) {
         map.removeLayer(ndviOverlays[zid]);
         delete ndviOverlays[zid];
@@ -1721,6 +1722,33 @@ function loadNdviStatus(zoneId) {
         });
 }
 
+var _pendingNdviAdds = {};
+var _flushNdviAddsScheduled = false;
+
+function scheduleNdviFlush() {
+    if (_flushNdviAddsScheduled) return;
+    _flushNdviAddsScheduled = true;
+    requestAnimationFrame(function() {
+        _flushNdviAddsScheduled = false;
+        var keys = Object.keys(_pendingNdviAdds);
+        if (!keys.length) return;
+        var batch = _pendingNdviAdds;
+        _pendingNdviAdds = {};
+        keys.forEach(function(zid) {
+            if (ndviOverlays[zid]) {
+                map.removeLayer(ndviOverlays[zid]);
+                delete ndviOverlays[zid];
+            }
+        });
+        keys.forEach(function(zid) {
+            var o = batch[zid];
+            if (!o) return;
+            o.overlay.addTo(map);
+            ndviOverlays[zid] = o.overlay;
+        });
+    });
+}
+
 function showNdviOverlay(zoneId, sceneDate, gen) {
     var dateParam = sceneDate ? "?date=" + sceneDate : "";
     var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
@@ -1738,11 +1766,8 @@ function showNdviOverlay(zoneId, sceneDate, gen) {
             var bounds = [[data.bbox[1], data.bbox[0]], [data.bbox[3], data.bbox[2]]];
             var imageUrl = URL.createObjectURL(data.blob);
             var overlay = L.imageOverlay(imageUrl, bounds, {opacity: 0.7});
-            if (ndviOverlays[zoneId]) {
-                map.removeLayer(ndviOverlays[zoneId]);
-            }
-            overlay.addTo(map);
-            ndviOverlays[zoneId] = overlay;
+            _pendingNdviAdds[zoneId] = {overlay: overlay};
+            scheduleNdviFlush();
             $("#showNdviBtn").hide();
             $("#hideNdviBtn").show();
         })
