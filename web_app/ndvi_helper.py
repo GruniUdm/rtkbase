@@ -54,7 +54,7 @@ def _stac_search(bbox, date_from=None, date_to=None, retries=2):
         'bbox': pc_bbox,
         'datetime': f'{date_from}T00:00:00Z/{date_to}T23:59:59Z',
         'limit': 30,
-        'query': {'eo:cloud_cover': {'lt': 90}},
+        'query': {'eo:cloud_cover': {'lt': 30}},
         'fields': {'include': ['id', 'properties.datetime', 'properties.eo:cloud_cover', 'bbox', 'geometry', 'assets.B04.href', 'assets.B08.href', 'assets.SCL.href']},
         'sortby': [{'field': 'properties.datetime', 'direction': 'desc'}]
     }
@@ -259,7 +259,22 @@ def _combine_rgba(rgb_path, alpha_path, out_path, cloud_mask_path=None):
         return False
 
 
-def calc_ndvi_for_zone(zone_id, prefer_date=None):
+NDVI_COLOR_RAMP = [
+    '-1 184 54 10 255',
+    '0 184 54 10 255',
+    '0.1 184 54 10 255',
+    '0.2 245 139 45 255',
+    '0.3 255 232 34 255',
+    '0.4 213 247 33 255',
+    '0.5 129 232 40 255',
+    '0.6 61 202 41 255',
+    '0.7 38 125 27 255',
+    '0.8 25 83 18 255',
+    '0.9 16 49 13 255',
+    '1 16 49 13 255',
+]
+
+def _calc_raw_ndvi(zone_id, prefer_date=None):
     zone = _read_zone_from_gpkg(zone_id)
     if not zone:
         return {'error': f'Zone {zone_id} not found in GPKG'}
@@ -278,7 +293,6 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
     if not bbox_utm:
         return {'error': 'Failed to compute UTM bbox'}
 
-    # Step 1: Get scene candidates from STAC, sorted by UTM match + date
     raw_candidates = _stac_search(bbox_wgs84)
     if not raw_candidates:
         return {'error': 'No suitable Sentinel-2 scene found for this area'}
@@ -320,7 +334,6 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
             capture_output=True, text=True, timeout=10)
         return r.stdout.strip() == '200'
 
-    # Build candidate URLs lazily
     base_aws = 'https://sentinel-s2-l2a.s3.amazonaws.com'
     token = _get_sas_token()
     token_suffix = f'?{token}' if token else ''
@@ -362,15 +375,12 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
 
         print(f'  Trying {scene_date}...')
 
-        # 1. Check SCL cloud cover FIRST (fast, 20m) before downloading B04/B08
         cloud_mask = None
         too_cloudy = False
         scl_url = cand.get('scl', '')
         if scl_url and _url_exists(scl_url):
             scl_crop = os.path.join(NDVI_DIR, f'{base_name}_SCL.tif')
             if crop_band(scl_url, scl_crop):
-                # Use SCL at native 20m for cloud check (no resample needed)
-                # Create binary cloud mask from SCL
                 cloud_mask_raw = os.path.join(NDVI_DIR, f'{base_name}_cloud.tif')
                 r_mask = subprocess.run(['gdal_calc.py', '-A', scl_crop,
                     '--outfile', cloud_mask_raw, '--calc',
@@ -378,7 +388,6 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
                     '--type', 'Byte', '--overwrite'],
                     capture_output=True, text=True, timeout=60, env=GDAL_ENV)
                 if r_mask.returncode == 0 and os.path.exists(cloud_mask_raw):
-                    # Clip to zone polygon
                     valid_cutline = os.path.join(NDVI_DIR, f'{base_name}_cutline.gpkg')
                     subprocess.run(['ogr2ogr', '-f', 'GPKG', '-makevalid', '-nln', 'cutline',
                         valid_cutline, GPKG_PATH, 'geozones', '-where', f"zone_id='{zone_id}'"],
@@ -406,7 +415,6 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
             if too_cloudy:
                 continue
 
-        # 2. Cloud check passed (or SCL unavailable) — verify and download B04/B08
         if not _url_exists(cand['b04']) or not _url_exists(cand['b08']):
             print(f'  {scene_date}: band URLs not accessible, trying next')
             continue
@@ -428,8 +436,7 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
         return {'error': 'All candidates had > 30% cloud cover within the zone, or bands unavailable'}
 
     base_name, b04_crop, b08_crop, cloud_mask, scene_date = selected
-    
-    # Resample cloud mask to 10m if we have one (for later overlay with NDVI)
+
     if cloud_mask and os.path.exists(cloud_mask):
         cloud_10m = os.path.join(NDVI_DIR, f'{base_name}_cloud_10m.tif')
         r_resample = subprocess.run(['gdalwarp', '-tr', '10', '10', '-r', 'near',
@@ -439,7 +446,6 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
             os.remove(cloud_mask)
             cloud_mask = cloud_10m
 
-    # 2. Calculate NDVI
     ndvi_raw = os.path.join(NDVI_DIR, f'{base_name}_raw.tif')
     calc_cmd = ['gdal_calc.py', '-A', b04_crop, '-B', b08_crop,
         '--outfile', ndvi_raw, '--calc', '(B.astype(float)-A.astype(float))/(B.astype(float)+A.astype(float)+1e-10)',
@@ -454,9 +460,7 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
     for f in [b04_crop, b08_crop]:
         os.remove(f)
 
-    # 3. Clip to polygon using GPKG layer directly, with makevalid
     ndvi_clipped = os.path.join(NDVI_DIR, f'{base_name}.tif')
-    # First make the cutline valid using ogr2ogr
     valid_cutline = os.path.join(NDVI_DIR, f'{base_name}_cutline.gpkg')
     subprocess.run(['ogr2ogr', '-f', 'GPKG', '-makevalid', '-nln', 'cutline',
         valid_cutline, GPKG_PATH, 'geozones', '-where', f"zone_id='{zone_id}'"],
@@ -465,7 +469,6 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
         '-dstalpha', '-of', 'GTiff', ndvi_raw, ndvi_clipped]
     r = subprocess.run(warp_cmd, capture_output=True, text=True, timeout=120, env=GDAL_ENV)
 
-    # Also clip cloud mask to the same boundary while cutline exists
     if cloud_mask and r.returncode == 0:
         cloud_clipped = os.path.join(NDVI_DIR, f'{base_name}_cloud_clip.tif')
         r_c = subprocess.run(['gdalwarp', '-cutline', valid_cutline, '-crop_to_cutline',
@@ -486,7 +489,6 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
         return {'error': f'gdalwarp failed: {r.stderr[:200]}'}
     os.remove(ndvi_raw)
 
-    # 4. Get NDVI stats from the clipped raw NDVI (before colorizing)
     info_r = subprocess.run(['gdalinfo', '-json', '-stats', ndvi_clipped],
         capture_output=True, text=True, timeout=30, env=GDAL_ENV)
     stats = {}
@@ -499,86 +501,196 @@ def calc_ndvi_for_zone(zone_id, prefer_date=None):
             stats['max'] = b0.get('maximum', 1)
             stats['mean'] = b0.get('mean', 0)
 
-    # Reject scenes with all-zero NDVI (cloudy or wrong tile)
     if stats.get('mean', 0) == 0 and stats.get('max', 0) == 0:
         for f in [ndvi_clipped, ndvi_raw]:
             if os.path.exists(f): os.remove(f)
         if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
         return {'error': 'All NDVI values are zero — scene likely cloudy or outside zone bounds'}
 
-    # 5. Extract NDVI band for colorization
+    return {
+        'zone_id': zone_id,
+        'zone_name': zone_name,
+        'scene_date': scene_date,
+        'min_ndvi': stats.get('min', 0),
+        'max_ndvi': stats.get('max', 0),
+        'mean_ndvi': stats.get('mean', 0),
+        'ndvi_clipped_path': ndvi_clipped,
+        'cloud_mask_path': cloud_mask,
+        'base_name': base_name,
+    }
+
+
+def _colorize_ndvi(ndvi_clipped, base_name, color_ramp=None, alpha_source=None):
+    if color_ramp is None:
+        color_ramp = NDVI_COLOR_RAMP
     ndvi_band = os.path.join(NDVI_DIR, f'{base_name}_b1.tif')
     r1 = subprocess.run(['gdal_translate', '-b', '1', ndvi_clipped, ndvi_band],
         capture_output=True, timeout=30, env=GDAL_ENV)
+    if r1.returncode != 0 or not os.path.exists(ndvi_band):
+        return None, None, None, 'Failed to extract NDVI band'
 
-    # 6. Colorize NDVI (without -alpha, output is 3-band RGB)
     color_file = os.path.join(NDVI_DIR, f'{base_name}_color.txt')
     ndvi_rgb = os.path.join(NDVI_DIR, f'{base_name}_rgb.tif')
     with open(color_file, 'w') as f:
-        f.write('-1 184 54 10 255\n')
-        f.write('0 184 54 10 255\n')
-        f.write('0.1 184 54 10 255\n')
-        f.write('0.2 245 139 45 255\n')
-        f.write('0.3 255 232 34 255\n')
-        f.write('0.4 213 247 33 255\n')
-        f.write('0.5 129 232 40 255\n')
-        f.write('0.6 61 202 41 255\n')
-        f.write('0.7 38 125 27 255\n')
-        f.write('0.8 25 83 18 255\n')
-        f.write('0.9 16 49 13 255\n')
-        f.write('1 16 49 13 255\n')
+        f.write('\n'.join(color_ramp) + '\n')
 
     r2 = subprocess.run(['gdaldem', 'color-relief', ndvi_band, color_file, ndvi_rgb],
         capture_output=True, text=True, timeout=60, env=GDAL_ENV)
     os.remove(color_file)
     if r2.returncode != 0 or not os.path.exists(ndvi_rgb):
-        for f in [ndvi_clipped, ndvi_band]:
+        for f in [ndvi_band]:
             if os.path.exists(f): os.remove(f)
-        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
-        return {'error': f'gdaldem color-relief failed: {r2.stderr[:200]}'}
+        return None, None, None, f'gdaldem color-relief failed: {r2.stderr[:200]}'
     os.remove(ndvi_band)
 
-    # 7. Extract alpha mask from clipped raster
+    alpha_from = alpha_source or ndvi_clipped
     ndvi_alpha = os.path.join(NDVI_DIR, f'{base_name}_alpha.tif')
-    r3 = subprocess.run(['gdal_translate', '-b', '2', ndvi_clipped, ndvi_alpha],
+    r3 = subprocess.run(['gdal_translate', '-b', '2', alpha_from, ndvi_alpha],
         capture_output=True, timeout=30, env=GDAL_ENV)
     if r3.returncode != 0 or not os.path.exists(ndvi_alpha):
-        for f in [ndvi_clipped, ndvi_rgb]:
-            if os.path.exists(f): os.remove(f)
-        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
-        return {'error': 'Failed to extract alpha band'}
-    os.remove(ndvi_clipped)
+        if os.path.exists(ndvi_rgb): os.remove(ndvi_rgb)
+        return None, None, None, 'Failed to extract alpha band'
 
-    # 8. Combine RGB + alpha into final RGBA
+    return ndvi_rgb, ndvi_alpha, None, None
+
+
+def _finalize_ndvi_overlay(base_name, ndvi_rgb, ndvi_alpha, cloud_mask):
     final_tif = os.path.join(NDVI_DIR, f'{base_name}_color.tif')
     if not _combine_rgba(ndvi_rgb, ndvi_alpha, final_tif, cloud_mask):
         for f in [ndvi_rgb, ndvi_alpha]:
             if os.path.exists(f): os.remove(f)
         if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
-        return {'error': 'Failed to combine RGB + alpha into final NDVI'}
+        return None, 'Failed to combine RGB + alpha into final NDVI'
     if cloud_mask and os.path.exists(cloud_mask):
         os.remove(cloud_mask)
     os.remove(ndvi_rgb)
     os.remove(ndvi_alpha)
 
-    # 9. Add overviews
     subprocess.run(['gdaladdo', '-r', 'average', final_tif, '2', '4', '8', '16'],
         capture_output=True, timeout=60, env=GDAL_ENV)
 
-    # 7. Store metadata
+    return final_tif, None
+
+
+def calc_ndvi_for_zone(zone_id, prefer_date=None):
+    raw = _calc_raw_ndvi(zone_id, prefer_date)
+    if 'error' in raw:
+        return raw
+
+    base_name = raw['base_name']
+    ndvi_clipped = raw['ndvi_clipped_path']
+    cloud_mask = raw['cloud_mask_path']
+
+    ndvi_rgb, ndvi_alpha, _, err = _colorize_ndvi(ndvi_clipped, base_name)
+    if err:
+        for f in [ndvi_clipped, ndvi_rgb, ndvi_alpha]:
+            if f and os.path.exists(f): os.remove(f)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': err}
+
+    final_tif, err = _finalize_ndvi_overlay(base_name, ndvi_rgb, ndvi_alpha, cloud_mask)
+    if err:
+        if os.path.exists(ndvi_clipped): os.remove(ndvi_clipped)
+        return {'error': err}
+
     ndvi_scenes = {
         'zone_id': zone_id,
-        'zone_name': zone_name,
+        'zone_name': raw['zone_name'],
         'file_path': final_tif,
-        'scene_date': scene_date,
-        'min_ndvi': stats.get('min', 0),
-        'max_ndvi': stats.get('max', 0),
-        'mean_ndvi': stats.get('mean', 0),
+        'scene_date': raw['scene_date'],
+        'min_ndvi': raw['min_ndvi'],
+        'max_ndvi': raw['max_ndvi'],
+        'mean_ndvi': raw['mean_ndvi'],
     }
     _store_metadata(ndvi_scenes)
     if os.path.exists(final_tif):
         os.remove(final_tif)
+    if os.path.exists(ndvi_clipped):
+        os.remove(ndvi_clipped)
     return ndvi_scenes
+
+
+def calc_contrast_ndvi_for_zone(zone_id, prefer_date=None, _cached_raw=None):
+    raw = _cached_raw if _cached_raw else _calc_raw_ndvi(zone_id, prefer_date)
+    if 'error' in raw:
+        return raw
+
+    base_name = raw['base_name']
+    ndvi_clipped = raw['ndvi_clipped_path']
+    cloud_mask = raw['cloud_mask_path']
+
+    from osgeo import gdal
+    import numpy as np
+    try:
+        ds = gdal.Open(ndvi_clipped)
+        if ds is None:
+            if os.path.exists(ndvi_clipped): os.remove(ndvi_clipped)
+            if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+            return {'error': 'Failed to open NDVI raster for contrast'}
+        ndvi_band = ds.GetRasterBand(1)
+        alpha_band = ds.GetRasterBand(2)
+        ndvi_arr = ndvi_band.ReadAsArray()
+        alpha_arr = alpha_band.ReadAsArray()
+        ds = None
+        valid = (alpha_arr > 0) & (ndvi_arr > -0.5) & (ndvi_arr < 1.0)
+        valid_ndvi = ndvi_arr[valid]
+        if len(valid_ndvi) == 0:
+            if os.path.exists(ndvi_clipped): os.remove(ndvi_clipped)
+            if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+            return {'error': 'No valid NDVI pixels in zone'}
+        p2 = np.percentile(valid_ndvi, 2)
+        p98 = np.percentile(valid_ndvi, 98)
+        min_val = float(p2)
+        max_val = float(p98)
+        if max_val - min_val < 0.02:
+            min_val = float(np.min(valid_ndvi))
+            max_val = float(np.max(valid_ndvi))
+        print(f'  Contrast stats: min={min_val:.4f} max={max_val:.4f} (from {len(valid_ndvi)} valid pixels)')
+    except Exception as e:
+        if os.path.exists(ndvi_clipped): os.remove(ndvi_clipped)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': f'Failed to compute contrast stats: {e}'}
+
+    ndvi_normalized = os.path.join(NDVI_DIR, f'{base_name}_norm.tif')
+    norm_cmd = ['gdal_calc.py', '-A', ndvi_clipped,
+        '--outfile', ndvi_normalized, '--calc',
+        f'(A-{min_val})/({max_val}-{min_val}+1e-10)',
+        '--NoDataValue', '-9999', '--type', 'Float32', '--overwrite']
+    r_norm = subprocess.run(norm_cmd, capture_output=True, text=True, timeout=120, env=GDAL_ENV)
+    if r_norm.returncode != 0 or not os.path.exists(ndvi_normalized):
+        if os.path.exists(ndvi_clipped): os.remove(ndvi_clipped)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': f'Normalization failed: {r_norm.stderr[:200]}'}
+
+    contrast_base = base_name + '_contrast'
+    ndvi_rgb, ndvi_alpha, _, err = _colorize_ndvi(ndvi_normalized, contrast_base, alpha_source=ndvi_clipped)
+    os.remove(ndvi_normalized)
+    if err:
+        for f in [ndvi_clipped, ndvi_rgb, ndvi_alpha]:
+            if f and os.path.exists(f): os.remove(f)
+        if cloud_mask and os.path.exists(cloud_mask): os.remove(cloud_mask)
+        return {'error': err}
+
+    final_tif, err = _finalize_ndvi_overlay(contrast_base, ndvi_rgb, ndvi_alpha, cloud_mask)
+    if err:
+        if os.path.exists(ndvi_clipped): os.remove(ndvi_clipped)
+        return {'error': err}
+
+    contrast_scenes = {
+        'zone_id': zone_id,
+        'zone_name': raw['zone_name'],
+        'file_path': final_tif,
+        'scene_date': raw['scene_date'],
+        'min_ndvi': min_val,
+        'max_ndvi': max_val,
+        'mean_ndvi': raw['mean_ndvi'],
+    }
+    _store_metadata_contrast(contrast_scenes)
+    if os.path.exists(final_tif):
+        os.remove(final_tif)
+    if os.path.exists(ndvi_clipped):
+        os.remove(ndvi_clipped)
+    return contrast_scenes
 
 def _store_metadata(scene):
     import sqlite3
@@ -608,6 +720,26 @@ def _store_metadata(scene):
         conn.close()
     except Exception as e:
         print(f'GPKG metadata error: {e}')
+
+def _store_metadata_contrast(scene):
+    import sqlite3
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('CREATE TABLE IF NOT EXISTS ndvi_contrast_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, zone_id TEXT, zone_name TEXT, file_path TEXT, scene_date TEXT, min_ndvi REAL, max_ndvi REAL, mean_ndvi REAL, raster_data BLOB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(zone_id, scene_date))')
+        raster_data = None
+        fp = scene.get('file_path', '')
+        if fp and os.path.exists(fp):
+            with open(fp, 'rb') as f:
+                raster_data = f.read()
+        blob = sqlite3.Binary(raster_data) if raster_data else None
+        conn.execute('INSERT OR REPLACE INTO ndvi_contrast_v2 (zone_id, zone_name, file_path, scene_date, min_ndvi, max_ndvi, mean_ndvi, raster_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (scene['zone_id'], scene['zone_name'], scene['file_path'], scene['scene_date'], scene['min_ndvi'], scene['max_ndvi'], scene['mean_ndvi'], blob))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f'Contrast NDVI metadata error: {e}')
+
 
 def get_ndvi_layers():
     import sqlite3
@@ -765,6 +897,118 @@ def get_ndvi_dates(zone_id=None):
         return []
 
 
+def get_contrast_ndvi_layers():
+    import sqlite3
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute('''
+            SELECT s.zone_id, s.zone_name, s.scene_date, s.min_ndvi, s.max_ndvi, s.mean_ndvi, s.created_at
+            FROM ndvi_contrast_v2 s
+            WHERE s.zone_id IN (SELECT zone_id FROM geozones)
+            ORDER BY s.zone_id, s.scene_date DESC
+        ''').fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def get_contrast_ndvi_overlay(zone_id, scene_date=None):
+    import sqlite3
+    import tempfile
+    cleanup_paths = []
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        if scene_date:
+            row = conn.execute('SELECT file_path, raster_data FROM ndvi_contrast_v2 WHERE zone_id=? AND scene_date=?', (zone_id, scene_date)).fetchone()
+        else:
+            row = conn.execute('SELECT file_path, raster_data FROM ndvi_contrast_v2 WHERE zone_id=? ORDER BY scene_date DESC LIMIT 1', (zone_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None, None
+        tif_path = row[0]
+        raster_data = row[1]
+        if raster_data:
+            tmp = tempfile.NamedTemporaryFile(suffix='.tif', delete=False)
+            tmp.write(raster_data)
+            tmp.close()
+            tif_path = tmp.name
+            cleanup_paths.append(tif_path)
+        elif not os.path.exists(tif_path):
+            return None, None
+    except Exception:
+        return None, None
+
+    info_r = subprocess.run(['gdalinfo', '-json', tif_path],
+        capture_output=True, text=True, timeout=10, env=GDAL_ENV)
+    if info_r.returncode != 0:
+        return None, None
+    info = json.loads(info_r.stdout)
+    corners = info.get('cornerCoordinates', {})
+    ll = corners.get('lowerLeft', [])
+    ur = corners.get('upperRight', [])
+    if len(ll) < 2 or len(ur) < 2:
+        return None, None
+
+    srs = info.get('coordinateSystem', {}).get('wkt', '')
+    matches = re.findall(r'(?:AUTHORITY|ID)\["EPSG",?"?(\d+)"?\]', srs or '')
+    epsg = matches[-1] if matches else '32639'
+    corners_utm = [f"{ll[0]} {ll[1]}", f"{ur[0]} {ll[1]}",
+                   f"{ur[0]} {ur[1]}", f"{ll[0]} {ur[1]}"]
+    lons, lats = [], []
+    for pt in corners_utm:
+        r = subprocess.run(['gdaltransform', '-s_srs', f'EPSG:{epsg}', '-t_srs', 'EPSG:4326'],
+            input=pt, capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            parts = r.stdout.strip().split()
+            if len(parts) >= 2:
+                lons.append(float(parts[0]))
+                lats.append(float(parts[1]))
+    if not lons:
+        for p in cleanup_paths:
+            try: os.remove(p)
+            except: pass
+        return None, None
+    bbox_wgs84 = [min(lons), min(lats), max(lons), max(lats)]
+
+    out_png = os.path.join(tempfile.gettempdir(), f'ndvi_contrast_{zone_id}.png')
+    r = subprocess.run(['gdal_translate', '-of', 'PNG', tif_path, out_png],
+        capture_output=True, timeout=30, env=GDAL_ENV)
+    if r.returncode != 0 or not os.path.exists(out_png):
+        for p in cleanup_paths:
+            try: os.remove(p)
+            except: pass
+        return None, None
+    with open(out_png, 'rb') as f:
+        png_bytes = f.read()
+    os.remove(out_png)
+    for p in cleanup_paths:
+        try: os.remove(p)
+        except: pass
+    return png_bytes, bbox_wgs84
+
+
+def get_contrast_ndvi_dates(zone_id=None):
+    import sqlite3
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        conn.row_factory = sqlite3.Row
+        if zone_id:
+            rows = conn.execute('SELECT DISTINCT scene_date FROM ndvi_contrast_v2 WHERE zone_id=? ORDER BY scene_date DESC', (zone_id,)).fetchall()
+        else:
+            rows = conn.execute('''
+                SELECT s.zone_id, s.scene_date
+                FROM ndvi_contrast_v2 s
+                WHERE s.zone_id IN (SELECT zone_id FROM geozones)
+                ORDER BY s.zone_id, s.scene_date DESC
+            ''').fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
 def recalc_all_ndvi():
     import sqlite3
     try:
@@ -778,7 +1022,8 @@ def recalc_all_ndvi():
     for zid in zones:
         try:
             result = calc_ndvi_for_zone(zid)
-            results[zid] = result.get("zone_id") is not None
+            contrast_result = calc_contrast_ndvi_for_zone(zid)
+            results[zid] = result.get("zone_id") is not None and contrast_result.get("zone_id") is not None
         except Exception as e:
             print(f"recalc_all_ndvi: {zid} failed: {e}")
             results[zid] = False

@@ -44,7 +44,23 @@ function setBaseLayer(name) {
         var sp = radios[i].parentNode.querySelector('span');
         if (sp && sp.textContent.indexOf(name) !== -1) { radios[i].checked = true; break; }
     }
-    if (name === 'Sentinel-2') showAllNdviOverlays(); else hideAllNdviOverlays();
+    if (name === 'Sentinel-2') {
+        if (ndviMode !== 'standard') {
+            hideAllNdviOverlays();
+            ndviAutoShown = false;
+        }
+        ndviMode = 'standard';
+        showAllNdviOverlays();
+    } else if (name === 'Contrast NDVI') {
+        if (ndviMode !== 'contrast') {
+            hideAllNdviOverlays();
+            ndviAutoShown = false;
+        }
+        ndviMode = 'contrast';
+        showAllNdviOverlays();
+    } else {
+        hideAllNdviOverlays();
+    }
 }
 
 function toggleNdviPanel(hdr) {
@@ -81,14 +97,37 @@ $(document).ready(function () {
         transparent: false,
         attribution: '&copy; EOX / Copernicus Sentinel'
     });
+    var s2Contrast = L.tileLayer.wms('https://tiles.maps.eox.at/wms?', {
+        layers: 's2cloudless-2024_3857',
+        format: 'image/jpeg',
+        transparent: false,
+        attribution: '&copy; EOX / Copernicus Sentinel'
+    });
     osm.addTo(map);
-    var layerControl = L.control.layers({'Map': osm, 'Satellite': sat, 'Sentinel-2': s2}, null, {position: 'bottomleft'}).addTo(map);
-    window._whLayers = {'Map': osm, 'Satellite': sat, 'Sentinel-2': s2};
+    var layerControl = L.control.layers({'Map': osm, 'Satellite': sat, 'Sentinel-2': s2, 'Contrast NDVI': s2Contrast}, null, {position: 'bottomleft'}).addTo(map);
+    window._whLayers = {'Map': osm, 'Satellite': sat, 'Sentinel-2': s2, 'Contrast NDVI': s2Contrast};
     window._whActive = 'Map';
 
     map.on("baselayerchange", function(e) {
-        window._whActive = e.name;
-        if (e.name === "Sentinel-2") {
+        var layerName = null;
+        if (e.layer === s2) layerName = 'Sentinel-2';
+        else if (e.layer === s2Contrast) layerName = 'Contrast NDVI';
+        else if (e.layer === osm) layerName = 'Map';
+        else if (e.layer === sat) layerName = 'Satellite';
+        window._whActive = layerName || e.name || 'Map';
+        if (layerName === "Sentinel-2") {
+            if (ndviMode !== 'standard') {
+                hideAllNdviOverlays();
+                ndviAutoShown = false;
+            }
+            ndviMode = 'standard';
+            showAllNdviOverlays();
+        } else if (layerName === "Contrast NDVI") {
+            if (ndviMode !== 'contrast') {
+                hideAllNdviOverlays();
+                ndviAutoShown = false;
+            }
+            ndviMode = 'contrast';
             showAllNdviOverlays();
         } else {
             hideAllNdviOverlays();
@@ -1514,9 +1553,12 @@ var ndviAutoShown = false;
 var ndviAllZoneIds = [];
 var ndviLegend = null;
 var ndviDateLabels = {};
+var ndviGeneration = 0;
+var ndviMode = 'standard';
 
 function showAllNdviOverlays() {
     if (ndviAutoShown) return;
+    if (ndviSelectedDate) return;
     // Wait for geozone polygons to load before creating date labels
     if (Object.keys(geozoneLayers).length === 0) {
         setTimeout(showAllNdviOverlays, 300);
@@ -1532,7 +1574,7 @@ function showAllNdviOverlays() {
             div.style.boxShadow = "0 1px 5px rgba(0,0,0,0.4)";
             div.style.fontSize = "12px";
             div.style.lineHeight = "1.4";
-            div.innerHTML = "<b>NDVI</b><br>" +
+            div.innerHTML = "<b>" + (ndviMode === 'contrast' ? 'Contrast NDVI' : 'NDVI') + "</b><br>" +
                 "<div style='width:18px;height:100px;display:inline-block;vertical-align:middle;border:1px solid #ccc;background:linear-gradient(to top,#b8360a,#f58b2d,#ffe822,#d5f721,#81e828,#3dca29,#267d1b,#195312,#10310d);'></div>" +
                 "<div style='display:inline-block;vertical-align:middle;padding-left:4px;'>" +
                 "1.0<br>0.8<br>0.6<br>0.5<br>0.4<br>0.3<br>0.2<br>0.0</div>";
@@ -1540,16 +1582,25 @@ function showAllNdviOverlays() {
         };
     }
     ndviLegend.addTo(map); $("#ndviLegend").show();
-    fetch("/api/ndvi/layers")
+    var gen = ++ndviGeneration;
+    var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
+    fetch(apiPrefix + "/layers")
         .then(function(r) { return r.json(); })
         .then(function(layers) {
+            if (gen !== ndviGeneration) return;
             ndviAllZoneIds = layers.map(function(l) { return l.zone_id; });
             ndviAllZoneIds.forEach(function(zid) {
-                if (!ndviOverlays[zid]) showNdviOverlay(zid);
-                fetch("/api/ndvi/data/" + zid)
+                if (gen !== ndviGeneration) return;
+                if (!ndviOverlays[zid]) showNdviOverlay(zid, undefined, gen);
+                fetch(apiPrefix + "/data/" + zid)
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
+                        if (gen !== ndviGeneration) return;
                         if (data && data.scene_date && geozoneLayers[zid]) {
+                            if (ndviDateLabels[zid]) {
+                                map.removeLayer(ndviDateLabels[zid]);
+                                delete ndviDateLabels[zid];
+                            }
                             var center = geozoneLayers[zid].polygon.getBounds().getCenter();
                             var label = L.marker(center, {
                                 icon: L.divIcon({
@@ -1581,6 +1632,7 @@ function hideAllNdviOverlays() {
     }
     if (ndviLegend) {
         map.removeControl(ndviLegend);
+        ndviLegend = null;
     }
     $("#ndviLegend").hide();
     ndviAutoShown = false;
@@ -1593,7 +1645,8 @@ var ndviSelectedDate = null;
 var ndviAvailableDates = [];
 
 function loadNdviDates(zoneId) {
-    fetch("/api/ndvi/scenes/" + zoneId)
+    var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
+    fetch(apiPrefix + "/scenes/" + zoneId)
         .then(function(r) { return r.json(); })
         .then(function(dates) {
             ndviAvailableDates = dates || [];
@@ -1618,6 +1671,8 @@ function loadNdviDates(zoneId) {
                 btn.style.cursor = "pointer";
                 btn.onclick = function() {
                     ndviSelectedDate = dateStr;
+                    ndviGeneration++;
+                    hideAllNdviOverlays();
                     loadNdviDates(zoneId);
                     loadNdviStatus(zoneId);
                     showNdviOverlay(zoneId, dateStr);
@@ -1629,7 +1684,9 @@ function loadNdviDates(zoneId) {
 }
 
 function loadNdviStatus(zoneId) {
-    fetch("/api/ndvi/data/" + zoneId)
+    var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
+    var dateParam = ndviSelectedDate ? "?date=" + ndviSelectedDate : "";
+    fetch(apiPrefix + "/data/" + zoneId + dateParam)
         .then(function(r) {
             if (r.redirected || !r.ok) {
                 $("#ndviStatus").html("No NDVI data");
@@ -1664,23 +1721,27 @@ function loadNdviStatus(zoneId) {
         });
 }
 
-function showNdviOverlay(zoneId, sceneDate) {
+function showNdviOverlay(zoneId, sceneDate, gen) {
     var dateParam = sceneDate ? "?date=" + sceneDate : "";
-    var overlayUrl = "/api/ndvi/overlay/" + zoneId + ".png" + dateParam;
+    var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
+    var overlayUrl = apiPrefix + "/overlay/" + zoneId + ".png" + dateParam;
     fetch(overlayUrl)
         .then(function(r) {
+            if (gen !== undefined && gen !== ndviGeneration) return null;
             if (!r.ok) throw new Error("NDVI overlay not found");
             var bbox = JSON.parse(r.headers.get("X-Bbox") || "[]");
             return r.blob().then(function(blob) { return {bbox: bbox, blob: blob}; });
         })
         .then(function(data) {
-            if (data.bbox.length !== 4) throw new Error("Invalid bbox");
+            if (gen !== undefined && gen !== ndviGeneration) return;
+            if (!data || data.bbox.length !== 4) throw new Error("Invalid bbox");
             var bounds = [[data.bbox[1], data.bbox[0]], [data.bbox[3], data.bbox[2]]];
             var imageUrl = URL.createObjectURL(data.blob);
-            var overlay = L.imageOverlay(imageUrl, bounds, {opacity: 0.7}).addTo(map);
+            var overlay = L.imageOverlay(imageUrl, bounds, {opacity: 0.7});
             if (ndviOverlays[zoneId]) {
                 map.removeLayer(ndviOverlays[zoneId]);
             }
+            overlay.addTo(map);
             ndviOverlays[zoneId] = overlay;
             $("#showNdviBtn").hide();
             $("#hideNdviBtn").show();
@@ -1707,8 +1768,8 @@ $("#calcNdviBtn").click(function() {
         $("#ndviStatus").html('<span style="color:red">Error: no zone selected</span>');
         return;
     }
-    $("#calcNdviBtn").prop("disabled", true).text("Calculating... (60-90s)");
-    $("#ndviStatus").html("Calculating NDVI...");
+    $("#calcNdviBtn").prop("disabled", true).text("Calculating... (60-120s)");
+    $("#ndviStatus").html("Calculating NDVI + Contrast NDVI...");
     fetch("/api/ndvi/calculate/" + zoneId, {method: "POST"})
         .then(function(r) {
             if (r.redirected) {
@@ -1720,8 +1781,11 @@ $("#calcNdviBtn").click(function() {
         })
         .then(function(result) {
             if (!result) return;
-            if (result.error) {
-                $("#ndviStatus").html('<span style="color:red">Error: ' + result.error + "</span>");
+            var errors = [];
+            if (result.standard && result.standard.error) errors.push("NDVI: " + result.standard.error);
+            if (result.contrast && result.contrast.error) errors.push("Contrast: " + result.contrast.error);
+            if (errors.length === 2) {
+                $("#ndviStatus").html('<span style="color:red">Error: ' + errors.join("; ") + "</span>");
                 $("#calcNdviBtn").prop("disabled", false).text("Calculate NDVI Now");
                 return;
             }
@@ -1736,7 +1800,11 @@ $("#calcNdviBtn").click(function() {
 
 $("#showNdviBtn").click(function() {
     var zoneId = currentZoneId;
-    if (zoneId) showNdviOverlay(zoneId);
+    if (zoneId) {
+        ndviGeneration++;
+        hideAllNdviOverlays();
+        showNdviOverlay(zoneId, ndviSelectedDate);
+    }
 });
 
 $("#hideNdviBtn").click(function() {
@@ -1797,7 +1865,8 @@ function buildCalendar(year, month, dateMap) {
 }
 
 function loadNdviCalendar() {
-    fetch("/api/ndvi/scenes")
+    var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
+    fetch(apiPrefix + "/scenes")
         .then(function(r) { return r.json(); })
         .then(function(scenes) {
             var container = document.getElementById("ndviCalendarDates");
@@ -1859,28 +1928,38 @@ function loadNdviCalendar() {
 
 function showAllNdviForDate(date) {
     hideAllNdviOverlays();
+    var gen = ++ndviGeneration;
+    var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
     for (var zid in geozoneLayers) {
         (function(zoneId) {
-            var overlayUrl = "/api/ndvi/overlay/" + zoneId + ".png?date=" + date;
+            var overlayUrl = apiPrefix + "/overlay/" + zoneId + ".png?date=" + date;
             fetch(overlayUrl)
                 .then(function(r) {
+                    if (gen !== ndviGeneration) return null;
                     if (!r.ok) return null;
                     var bbox = JSON.parse(r.headers.get("X-Bbox") || "[]");
                     return r.blob().then(function(blob) { return {bbox: bbox, blob: blob}; });
                 })
                 .then(function(data) {
+                    if (gen !== ndviGeneration) return;
                     if (!data || data.bbox.length !== 4) return;
                     var bounds = [[data.bbox[1], data.bbox[0]], [data.bbox[3], data.bbox[2]]];
                     var imageUrl = URL.createObjectURL(data.blob);
-                    var overlay = L.imageOverlay(imageUrl, bounds, {opacity: 0.7}).addTo(map);
+                    var overlay = L.imageOverlay(imageUrl, bounds, {opacity: 0.7});
                     if (ndviOverlays[zoneId]) {
                         map.removeLayer(ndviOverlays[zoneId]);
                     }
+                    overlay.addTo(map);
                     ndviOverlays[zoneId] = overlay;
-                    fetch("/api/ndvi/data/" + zoneId + "?date=" + date)
+                    fetch(apiPrefix + "/data/" + zoneId + "?date=" + date)
                         .then(function(r2) { return r2.ok ? r2.json() : null; })
                         .then(function(data2) {
+                            if (gen !== ndviGeneration) return;
                             if (data2 && !data2.error && geozoneLayers[zoneId]) {
+                                if (ndviDateLabels[zoneId]) {
+                                    map.removeLayer(ndviDateLabels[zoneId]);
+                                    delete ndviDateLabels[zoneId];
+                                }
                                 var center = geozoneLayers[zoneId].polygon.getBounds().getCenter();
                                 var label = L.marker(center, {
                                     icon: L.divIcon({
@@ -1909,7 +1988,7 @@ function showAllNdviForDate(date) {
             div.style.boxShadow = "0 1px 5px rgba(0,0,0,0.4)";
             div.style.fontSize = "12px";
             div.style.lineHeight = "1.4";
-            div.innerHTML = "<b>NDVI</b><br>" +
+            div.innerHTML = "<b>" + (ndviMode === 'contrast' ? 'Contrast NDVI' : 'NDVI') + "</b><br>" +
                 "<div style='width:18px;height:100px;display:inline-block;vertical-align:middle;border:1px solid #ccc;background:linear-gradient(to top,#b8360a,#f58b2d,#ffe822,#d5f721,#81e828,#3dca29,#267d1b,#195312,#10310d);'></div>" +
                 "<div style='display:inline-block;vertical-align:middle;padding-left:4px;'>1.0<br>0.8<br>0.6<br>0.5<br>0.4<br>0.3<br>0.2<br>0.0</div>";
             return div;

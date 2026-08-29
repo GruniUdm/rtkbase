@@ -1249,7 +1249,7 @@ def _delete_ndvi_for_zone(zone_id):
     import os as _os
     try:
         file_paths = set()
-        for table in ('ndvi_scenes_v2', 'ndvi_scenes'):
+        for table in ('ndvi_scenes_v2', 'ndvi_scenes', 'ndvi_contrast_v2'):
             try:
                 for (fp,) in _db.execute(f'SELECT file_path FROM {table} WHERE zone_id=?', (zone_id,)):
                     if fp:
@@ -1263,7 +1263,7 @@ def _delete_ndvi_for_zone(zone_id):
                     _os.remove(p)
                 except OSError:
                     pass
-        for table in ('ndvi_scenes_v2', 'ndvi_scenes'):
+        for table in ('ndvi_scenes_v2', 'ndvi_scenes', 'ndvi_contrast_v2'):
             try:
                 _db.execute(f'DELETE FROM {table} WHERE zone_id=?', (zone_id,))
             except Exception:
@@ -1706,9 +1706,10 @@ def list_ndvi_layers():
 def calculate_ndvi(zone_id):
     try:
         result = ndvi_helper.calc_ndvi_for_zone(zone_id)
-        if "error" in result:
-            return (json.dumps(result), 400)
-        return json.dumps(result, default=str)
+        contrast_result = ndvi_helper.calc_contrast_ndvi_for_zone(zone_id)
+        if "error" in result and "error" in contrast_result:
+            return (json.dumps({"error": result["error"], "contrast_error": contrast_result["error"]}), 400)
+        return json.dumps({"standard": result, "contrast": contrast_result}, default=str)
     except Exception as e:
         return (json.dumps({"error": str(e)}), 500)
 
@@ -1774,6 +1775,51 @@ def get_ndvi_data(zone_id):
             if not scene_date or layer.get("scene_date") == scene_date:
                 return json.dumps(layer, default=str)
     return (json.dumps({"error": "No NDVI data for this zone"}), 404)
+
+#### Contrast NDVI Endpoints ####
+
+@app.route("/api/ndvi/contrast/layers")
+@login_required
+def list_contrast_ndvi_layers():
+    return json.dumps(ndvi_helper.get_contrast_ndvi_layers())
+
+@app.route("/api/ndvi/contrast/scenes")
+@login_required
+def get_contrast_ndvi_scenes():
+    from flask import request
+    zone_id = request.args.get("zone_id")
+    return json.dumps(ndvi_helper.get_contrast_ndvi_dates(zone_id), default=str)
+
+@app.route("/api/ndvi/contrast/scenes/<zone_id>")
+@login_required
+def get_contrast_ndvi_scenes_for_zone(zone_id):
+    return json.dumps(ndvi_helper.get_contrast_ndvi_dates(zone_id), default=str)
+
+@app.route("/api/ndvi/contrast/overlay/<zone_id>.png")
+@login_required
+def serve_contrast_ndvi_overlay(zone_id):
+    from flask import request, make_response
+    scene_date = request.args.get("date")
+    png_bytes, bbox = ndvi_helper.get_contrast_ndvi_overlay(zone_id, scene_date)
+    if png_bytes is None:
+        return ("", 404)
+    response = make_response(png_bytes)
+    response.headers["Content-Type"] = "image/png"
+    response.headers["X-Bbox"] = json.dumps(bbox)
+    return response
+
+@app.route("/api/ndvi/contrast/data/<zone_id>")
+@login_required
+def get_contrast_ndvi_data(zone_id):
+    from flask import request
+    scene_date = request.args.get("date")
+    layers = ndvi_helper.get_contrast_ndvi_layers()
+    for layer in layers:
+        if layer["zone_id"] == zone_id:
+            if not scene_date or layer.get("scene_date") == scene_date:
+                return json.dumps(layer, default=str)
+    return (json.dumps({"error": "No contrast NDVI data for this zone"}), 404)
+
 #### Handle connect/disconnect events ####
 
 @socketio.on("connect", namespace="/test")
@@ -3156,7 +3202,7 @@ if __name__ == "__main__":
             import sqlite3 as _sqlite3
 
             def _run_all():
-                from ndvi_helper import calc_ndvi_for_zone
+                from ndvi_helper import calc_ndvi_for_zone, calc_contrast_ndvi_for_zone
                 zones = gpkg_helper.list_geozones(_db)
                 if not zones:
                     return
@@ -3167,15 +3213,25 @@ if __name__ == "__main__":
                         done_today.add(r[0])
                 except Exception:
                     pass
+                contrast_done_today = set()
+                try:
+                    for r in conn.execute("SELECT DISTINCT zone_id FROM ndvi_contrast_v2 WHERE date(created_at, 'localtime') = date('now', 'localtime')"):
+                        contrast_done_today.add(r[0])
+                except Exception:
+                    pass
                 conn.close()
                 for z in zones:
                     zid = z['id']
-                    if zid in done_today:
-                        continue
-                    try:
-                        calc_ndvi_for_zone(zid)
-                    except Exception as e:
-                        print(f"NDVI calc for zone {zid}: {e}")
+                    if zid not in done_today:
+                        try:
+                            calc_ndvi_for_zone(zid)
+                        except Exception as e:
+                            print(f"NDVI calc for zone {zid}: {e}")
+                    if zid not in contrast_done_today:
+                        try:
+                            calc_contrast_ndvi_for_zone(zid)
+                        except Exception as e:
+                            print(f"Contrast NDVI calc for zone {zid}: {e}")
 
             # First pass: run immediately to catch up
             try:
