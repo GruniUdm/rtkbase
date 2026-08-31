@@ -1579,7 +1579,7 @@ def _alerts_json():
                        'FROM field_alerts ORDER BY status, last_seen DESC').fetchall()
     items = [dict(zip(cols, r)) for r in rows]
     return json.dumps({'pending': [i for i in items if i['status'] == 'pending'],
-                       'processed': [i for i in items if i['status'] != 'pending']})
+                       'processed': [i for i in items if i['status'] == 'processed']})
 
 
 @app.route('/api/alerts/scan')
@@ -1608,7 +1608,7 @@ def process_field_alert(alert_id):
 @login_required
 def delete_field_alert(alert_id):
     _ensure_field_alerts_table()
-    _db.execute('DELETE FROM field_alerts WHERE id=?', (alert_id,))
+    _db.execute('UPDATE field_alerts SET status=? WHERE id=?', ('hidden', alert_id))
     _db.commit()
     return json.dumps({'ok': True})
 
