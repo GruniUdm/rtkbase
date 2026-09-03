@@ -137,6 +137,44 @@
                 <div class="card-body" id="alertsBody" style="display:none;">
                     <button class="btn btn-sm btn-outline-info btn-block" onclick="scanAlerts()">Проверить движение</button>
                     <div id="alertsList" style="margin-top:6px;font-size:0.85em;"><span class="text-muted">Список пуст</span></div>
+                    <hr style="margin:10px 0;border-color:#ddd;">
+                    <div style="font-weight:600;margin-bottom:6px;font-size:0.95em;">Обработки на карте</div>
+                    <div class="form-row">
+                        <div class="col-6 mb-1"><input type="date" class="form-control form-control-sm" id="opsDateFrom" placeholder="С"></div>
+                        <div class="col-6 mb-1"><input type="date" class="form-control form-control-sm" id="opsDateTo" placeholder="По"></div>
+                    </div>
+                    <div class="form-row">
+                        <div class="col-6 mb-1"><input type="text" class="form-control form-control-sm" id="opsFilterOp" placeholder="Механизатор"></div>
+                        <div class="col-6 mb-1">
+                            <select class="form-control form-control-sm" id="opsFilterType">
+                                <option value="">Все типы</option>
+                                <option value="Вспашка">Вспашка</option>
+                                <option value="Культивация">Культивация</option>
+                                <option value="Дискование">Дискование</option>
+                                <option value="Боронование">Боронование</option>
+                                <option value="Прикатывание">Прикатывание</option>
+                                <option value="Посев">Посев</option>
+                                <option value="Посадка">Посадка</option>
+                                <option value="Междурядная обработка">Междурядная обработка</option>
+                                <option value="Окучивание">Окучивание</option>
+                                <option value="Внесение удобрений">Внесение удобрений</option>
+                                <option value="Опрыскивание СЗР">Опрыскивание СЗР</option>
+                                <option value="Десикация">Десикация</option>
+                                <option value="Орошение">Орошение</option>
+                                <option value="Уборка">Уборка</option>
+                                <option value="Силосование">Силосование</option>
+                                <option value="Заготовка кормов">Заготовка кормов</option>
+                                <option value="Другое">Другое</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="col-6 mb-1"><input type="text" class="form-control form-control-sm" id="opsFilterMach" placeholder="Агрегат"></div>
+                        <div class="col-6 mb-1"><input type="text" class="form-control form-control-sm" id="opsFilterMat" placeholder="Препарат"></div>
+                    </div>
+                    <button class="btn btn-sm btn-outline-primary btn-block" onclick="searchFieldOps()">Найти</button>
+                    <button class="btn btn-sm btn-outline-secondary btn-block mt-1" onclick="clearOpsTracks();$('#opsSearchResults').html('')">Скрыть треки</button>
+                    <div id="opsSearchResults" style="margin-top:6px;max-height:320px;overflow-y:auto;font-size:0.85em;"></div>
                 </div>
             </div>
 
@@ -433,6 +471,6 @@
 <script>
 var baseCoordinates = {{ base_coordinates|tojson }};
 </script>
-<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5051') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5052') }}"></script>
 {% endblock %}
 

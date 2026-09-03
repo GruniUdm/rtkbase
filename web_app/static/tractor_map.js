@@ -1031,6 +1031,88 @@ function deleteFieldOp(opId) {
         .catch(function(e) { alert('Не удалось удалить: ' + e.message); });
 }
 
+// -------- Поиск обработок на карте --------
+
+var opTrackLayers = {};
+var _opsSearchCache = [];
+
+function searchFieldOps() {
+    var params = new URLSearchParams();
+    var df = document.getElementById('opsDateFrom');
+    var dt = document.getElementById('opsDateTo');
+    var op = document.getElementById('opsFilterOp');
+    var tp = document.getElementById('opsFilterType');
+    var mc = document.getElementById('opsFilterMach');
+    var mt = document.getElementById('opsFilterMat');
+    if (df && df.value) params.set('date_from', df.value);
+    if (dt && dt.value) params.set('date_to', dt.value);
+    if (op && op.value) params.set('operator', op.value);
+    if (tp && tp.value) params.set('op_type', tp.value);
+    if (mc && mc.value) params.set('machinery', mc.value);
+    if (mt && mt.value) params.set('material', mt.value);
+    var el = document.getElementById('opsSearchResults');
+    el.innerHTML = '<span class="text-muted">Загрузка...</span>';
+    fetch('/api/field-ops/search?' + params.toString())
+        .then(function(r) { return r.json(); })
+        .then(function(ops) {
+            if (!ops || !ops.length) {
+                el.innerHTML = '<span class="text-muted">Ничего не найдено</span>';
+                return;
+            }
+            _opsSearchCache = ops;
+            var html = '<div style="color:#666;margin-bottom:4px;">Найдено: ' + ops.length + '</div>';
+            ops.forEach(function(o, idx) {
+                var hasTrack = o.track_data && o.track_data.length > 10;
+                html += '<div class="op-search-item" style="padding:3px 0;border-bottom:1px solid #eee;cursor:' + (hasTrack ? 'pointer' : 'default') + ';" onclick="showSingleOpTrack(' + idx + ')">';
+                html += '<span style="color:#888;font-size:0.9em;">' + (o.op_date || '') + '</span> ';
+                html += '<b>' + escapeHtml(o.op_type || '') + '</b>';
+                if (o.operator) html += ' · ' + escapeHtml(o.operator);
+                if (o.machinery) html += ' · ' + escapeHtml(o.machinery);
+                html += ' <span style="color:#666;">' + escapeHtml(o.zone_name || o.zone_id || '') + '</span>';
+                if (hasTrack) html += ' <span style="color:#3498db;" title="Показать трек">🔍</span>';
+                html += '</div>';
+            });
+            el.innerHTML = html;
+        })
+        .catch(function(e) {
+            el.innerHTML = '<span style="color:red;">Ошибка: ' + e.message + '</span>';
+        });
+}
+
+function showSingleOpTrack(idx) {
+    var o = _opsSearchCache[idx];
+    if (!o) return;
+    if (!o.track_data) { alert('Трек не сохранён'); return; }
+    var track;
+    try { track = JSON.parse(o.track_data); } catch(e) { alert('Ошибка данных трека'); return; }
+    if (!track || track.length < 2) { alert('Трек пуст'); return; }
+    var zone = geozoneLayers[o.zone_id];
+    if (!zone) { alert('Поле не найдено на карте'); return; }
+    closeGeozonePanel();
+    currentZoneId = null;
+    focusGeozone(o.zone_id);
+    clearOpsTracks();
+    var latlngs = track.map(function(p) { return [p.lat, p.lon]; });
+    var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
+    var popup = '<b>' + escapeHtml(o.op_type || '') + '</b><br>' +
+        (o.op_date || '') + '<br>' +
+        (o.operator ? 'Механизатор: ' + escapeHtml(o.operator) + '<br>' : '') +
+        (o.machinery ? 'Агрегат: ' + escapeHtml(o.machinery) + '<br>' : '') +
+        (o.material ? 'Препарат: ' + escapeHtml(o.material) + '<br>' : '') +
+        (o.zone_name ? 'Поле: ' + escapeHtml(o.zone_name) : '');
+    polyline.bindPopup(popup);
+    polyline.openPopup();
+    opTrackLayers[o.id] = polyline;
+    map.fitBounds(polyline.getBounds().pad(0.15));
+}
+
+function clearOpsTracks() {
+    for (var k in opTrackLayers) {
+        map.removeLayer(opTrackLayers[k]);
+        delete opTrackLayers[k];
+    }
+}
+
 function startEditPoints() {
     var id = currentZoneId;
     if (!id || !geozoneLayers[id]) return;

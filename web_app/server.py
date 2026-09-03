@@ -1327,6 +1327,39 @@ def list_field_ops(zone_id):
     return json.dumps([_field_op_row(r) for r in rows])
 
 
+@app.route('/api/field-ops/search')
+@login_required
+def search_field_ops():
+    _ensure_field_ops_table()
+    from flask import request
+    conds, params = [], []
+    for col, val in [('zone_id', request.args.get('zone_id')),
+                     ('op_type', request.args.get('op_type')),
+                     ('op_date', request.args.get('op_date'))]:
+        if val:
+            conds.append(f'{col} = ?')
+            params.append(val)
+    for col, val in [('machinery', request.args.get('machinery')),
+                     ('operator', request.args.get('operator')),
+                     ('material', request.args.get('material')),
+                     ('crop', request.args.get('crop'))]:
+        if val:
+            conds.append(f'{col} LIKE ?')
+            params.append(f'%{val}%')
+    dfrom = request.args.get('date_from')
+    dto = request.args.get('date_to')
+    if dfrom:
+        conds.append('op_date >= ?')
+        params.append(dfrom)
+    if dto:
+        conds.append('op_date <= ?')
+        params.append(dto)
+    where = ' AND '.join(conds) if conds else '1=1'
+    _sel = ', '.join(_FIELD_OP_COLS)
+    rows = _db.execute(f'SELECT {_sel} FROM field_ops WHERE {where} ORDER BY op_date DESC LIMIT 200', params).fetchall()
+    return json.dumps([_field_op_row(r) for r in rows])
+
+
 @app.route('/api/geozones/<zone_id>/ops', methods=['POST'])
 @login_required
 def create_field_op(zone_id):
