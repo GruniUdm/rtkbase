@@ -1207,7 +1207,20 @@ function analyzeSessionVisits(points, ip, dateStr) {
             track: curPoints
         });
     }
-    return visits;
+    var merged = [];
+    for (var m = 0; m < visits.length; m++) {
+        if (merged.length === 0) { merged.push(visits[m]); continue; }
+        var prev = merged[merged.length - 1];
+        var gap = visits[m].first_seen - prev.last_seen;
+        if (prev.zone_id === visits[m].zone_id && gap <= 120 && gap >= 0) {
+            prev.track = prev.track.concat(visits[m].track);
+            prev.last_seen = visits[m].last_seen;
+            prev.points_count = prev.track.length;
+        } else {
+            merged.push(visits[m]);
+        }
+    }
+    return merged;
 }
 
 function renderSessionVisits() {
