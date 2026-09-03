@@ -1113,6 +1113,173 @@ function clearOpsTracks() {
     }
 }
 
+// -------- Обработка сессий из архива --------
+
+var _sessionVisits = [];
+
+function openSessionForProcessing(ip, firstTs, lastTs, dateStr) {
+    var body = document.getElementById('alertsBody');
+    if (body) body.style.display = 'block';
+    var list = document.getElementById('alertsList');
+    if (list) list.innerHTML = '<span class="text-muted">Анализ трека...</span>';
+    var url = '/api/tractor_track/' + encodeURIComponent(ip) + '?from=' + firstTs + '&to=' + lastTs;
+    fetch(url)
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function(points) {
+            if (!points || points.length < 2) {
+                if (list) list.innerHTML = '<span class="text-muted">Трек пуст</span>';
+                return;
+            }
+            var visits = analyzeSessionVisits(points, ip, dateStr);
+            _sessionVisits = visits;
+            renderSessionVisits();
+        })
+        .catch(function(e) {
+            if (list) list.innerHTML = '<span style="color:red;">Ошибка: ' + e.message + '</span>';
+        });
+}
+
+function analyzeSessionVisits(points, ip, dateStr) {
+    var visits = [];
+    var curZone = null;
+    var curStart = null;
+    var curPoints = [];
+    for (var i = 0; i < points.length; i++) {
+        var p = points[i];
+        var hitZone = null;
+        for (var zid in geozoneLayers) {
+            if (geozoneLayers[zid]._hide) continue;
+            if (pointInPolygon(p.lat, p.lon, geozoneLayers[zid].data.points)) {
+                hitZone = zid;
+                break;
+            }
+        }
+        if (hitZone) {
+            if (hitZone !== curZone) {
+                if (curZone && curPoints.length >= 2) {
+                    visits.push({
+                        zone_id: curZone,
+                        zone_name: geozoneLayers[curZone] ? geozoneLayers[curZone].data.name : curZone,
+                        tractor_ip: ip,
+                        alert_date: dateStr,
+                        first_seen: curStart,
+                        last_seen: curPoints[curPoints.length - 1].t,
+                        points_count: curPoints.length,
+                        track: curPoints
+                    });
+                }
+                curZone = hitZone;
+                curStart = p.t;
+                curPoints = [p];
+            } else {
+                curPoints.push(p);
+            }
+        } else {
+            if (curZone && curPoints.length >= 2) {
+                visits.push({
+                    zone_id: curZone,
+                    zone_name: geozoneLayers[curZone] ? geozoneLayers[curZone].data.name : curZone,
+                    tractor_ip: ip,
+                    alert_date: dateStr,
+                    first_seen: curStart,
+                    last_seen: curPoints[curPoints.length - 1].t,
+                    points_count: curPoints.length,
+                    track: curPoints
+                });
+            }
+            curZone = null;
+            curStart = null;
+            curPoints = [];
+        }
+    }
+    if (curZone && curPoints.length >= 2) {
+        visits.push({
+            zone_id: curZone,
+            zone_name: geozoneLayers[curZone] ? geozoneLayers[curZone].data.name : curZone,
+            tractor_ip: ip,
+            alert_date: dateStr,
+            first_seen: curStart,
+            last_seen: curPoints[curPoints.length - 1].t,
+            points_count: curPoints.length,
+            track: curPoints
+        });
+    }
+    return visits;
+}
+
+function renderSessionVisits() {
+    var list = document.getElementById('alertsList');
+    if (!list) return;
+    if (!_sessionVisits.length) {
+        list.innerHTML = '<span class="text-muted">Трактор не был в поле</span>';
+        return;
+    }
+    var html = '';
+    _sessionVisits.forEach(function(v, idx) {
+        html += '<div class="alert-item" style="border:1px solid #fff3cd;background:#fff8e1;border-radius:4px;padding:4px 6px;margin-bottom:4px;">';
+        html += '<div><b>' + escapeHtml(v.zone_name) + '</b> · ' + escapeHtml(v.tractor_ip) + '</div>';
+        html += '<div style="color:#666;font-size:0.8em;">' + escapeHtml(v.alert_date) + ' ' + _fmtTime(v.first_seen) + '–' + _fmtTime(v.last_seen) + ' · ' + v.points_count + ' точек</div>';
+        html += '<div style="margin-top:3px;">';
+        html += '<button class="btn btn-xs btn-outline-info" data-keep-panel="1" onclick="showSessionVisitTrack(' + idx + ')" style="font-size:0.75em;padding:0 6px;">Показать</button> ';
+        html += '<button class="btn btn-xs btn-success" data-keep-panel="1" onclick="openVisitWork(' + idx + ')" style="font-size:0.75em;padding:0 6px;">Обработать</button> ';
+        html += '<button class="btn btn-xs btn-outline-danger" data-keep-panel="1" onclick="removeSessionVisit(' + idx + ')" style="font-size:0.75em;padding:0 6px;">Удалить</button>';
+        html += '</div></div>';
+    });
+    list.innerHTML = html;
+}
+
+function showSessionVisitTrack(idx) {
+    var v = _sessionVisits[idx];
+    if (!v || !v.track || v.track.length < 2) return;
+    var zone = geozoneLayers[v.zone_id];
+    if (!zone) return;
+    currentZoneId = null;
+    focusGeozone(v.zone_id);
+    var latlngs = v.track.map(function(p) { return [p.lat, p.lon]; });
+    var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
+    polyline.bindPopup('<b>' + escapeHtml(v.zone_name) + '</b><br>' + v.alert_date + ' ' + _fmtTime(v.first_seen) + '–' + _fmtTime(v.last_seen));
+    polyline.openPopup();
+    opTrackLayers['visit_' + idx] = polyline;
+    map.fitBounds(polyline.getBounds().pad(0.15));
+}
+
+function openVisitWork(idx) {
+    var v = _sessionVisits[idx];
+    if (!v) return;
+    _pendingAlertId = null;
+    _pendingAlertIp = v.tractor_ip || null;
+    _pendingAlertTrack = _simplifyTrack(v.track);
+    if (!v.zone_id || !geozoneLayers[v.zone_id]) {
+        alert('Поле не найдено на карте');
+        return;
+    }
+    editGeozone(v.zone_id);
+    setTimeout(function() {
+        var d = new Date((v.last_seen || v.first_seen || Date.now() / 1000) * 1000);
+        var dateEl = document.getElementById('opDate');
+        if (dateEl) dateEl.value = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+        if (v.tractor_ip) {
+            var machEl = document.getElementById('opMachinery');
+            if (machEl) machEl.value = v.tractor_ip;
+        }
+        var f = document.getElementById('addOpForm');
+        if (f && f.style.display !== 'block') f.style.display = 'block';
+        var ops = document.getElementById('gpOpsBody');
+        if (ops) ops.scrollIntoView({behavior: 'smooth', block: 'start'});
+        if (_pendingAlertTrack) {
+            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }));
+        }
+    }, 120);
+}
+
+function removeSessionVisit(idx) {
+    _sessionVisits.splice(idx, 1);
+    renderSessionVisits();
+}
+
 function startEditPoints() {
     var id = currentZoneId;
     if (!id || !geozoneLayers[id]) return;
@@ -1553,7 +1720,8 @@ function toggleTractorSessions(username) {
                     '<span>' + s.date + ' ' + s.start_time + '→' + s.end_time + '</span> ' +
                     '<span class="text-muted">' + s.count + 'pts ' + distText + '</span> ' +
                     '<a class="btn btn-sm btn-outline-secondary" href="/api/download_session_csv/' + username + '/' + s.first_t + '" download style="padding:0 4px;font-size:0.75em;">CSV</a> ' +
-                    '<button class="btn btn-sm ' + btnClass + '" onclick="showTrackSession(\'' + username + '\', ' + s.first_t + ', ' + s.last_t + ', this)" style="padding:0 4px;font-size:0.75em;">' + btnText + '</button></div>';
+                    '<button class="btn btn-sm ' + btnClass + '" onclick="showTrackSession(\'' + username + '\', ' + s.first_t + ', ' + s.last_t + ', this)" style="padding:0 4px;font-size:0.75em;">' + btnText + '</button> ' +
+                    '<button class="btn btn-sm btn-outline-warning" onclick="openSessionForProcessing(\'' + username + '\', ' + s.first_t + ', ' + s.last_t + ', \'' + s.date + '\')" style="padding:0 4px;font-size:0.75em;">В обработку</button></div>';
             });
             container.innerHTML = html;
             expandedSessionCache[username] = html;
