@@ -1060,17 +1060,21 @@ function searchFieldOps() {
                 return;
             }
             _opsSearchCache = ops;
-            var html = '<div style="color:#666;margin-bottom:4px;">Найдено: ' + ops.length + '</div>';
+            var html = '<div style="display:flex;justify-content:space-between;align-items:center;color:#666;margin-bottom:4px;">' +
+                '<span>Найдено: ' + ops.length + '</span>' +
+                '<button class="btn btn-sm btn-outline-info" onclick="showSelectedOpTracks()" style="font-size:0.75em;padding:0 6px;">Показать выбранные</button></div>';
             ops.forEach(function(o, idx) {
                 var hasTrack = o.track_data && o.track_data.length > 10;
-                html += '<div class="op-search-item" style="padding:3px 0;border-bottom:1px solid #eee;cursor:' + (hasTrack ? 'pointer' : 'default') + ';" onclick="showSingleOpTrack(' + idx + ')">';
+                html += '<div class="op-search-item" style="padding:3px 0;border-bottom:1px solid #eee;display:flex;align-items:center;gap:4px;">';
+                html += '<input type="checkbox" id="opChk_' + idx + '" ' + (hasTrack ? '' : 'disabled') + '>';
+                html += '<span style="flex:1;cursor:' + (hasTrack ? 'pointer' : 'default') + ';" onclick="showSingleOpTrack(' + idx + ')">';
                 html += '<span style="color:#888;font-size:0.9em;">' + (o.op_date || '') + '</span> ';
                 html += '<b>' + escapeHtml(o.op_type || '') + '</b>';
                 if (o.operator) html += ' · ' + escapeHtml(o.operator);
                 if (o.machinery) html += ' · ' + escapeHtml(o.machinery);
                 html += ' <span style="color:#666;">' + escapeHtml(o.zone_name || o.zone_id || '') + '</span>';
                 if (hasTrack) html += ' <span style="color:#3498db;" title="Показать трек">🔍</span>';
-                html += '</div>';
+                html += '</span></div>';
             });
             el.innerHTML = html;
         })
@@ -1091,7 +1095,11 @@ function showSingleOpTrack(idx) {
     closeGeozonePanel();
     currentZoneId = null;
     focusGeozone(o.zone_id);
-    clearOpsTracks();
+    if (opTrackLayers[o.id]) {
+        map.removeLayer(opTrackLayers[o.id]);
+        delete opTrackLayers[o.id];
+        return;
+    }
     var latlngs = track.map(function(p) { return [p.lat, p.lon]; });
     var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
     var popup = '<b>' + escapeHtml(o.op_type || '') + '</b><br>' +
@@ -1104,6 +1112,42 @@ function showSingleOpTrack(idx) {
     polyline.openPopup();
     opTrackLayers[o.id] = polyline;
     map.fitBounds(polyline.getBounds().pad(0.15));
+}
+
+function showSelectedOpTracks() {
+    var checked = [];
+    _opsSearchCache.forEach(function(o, idx) {
+        var cb = document.getElementById('opChk_' + idx);
+        if (cb && cb.checked) checked.push(idx);
+    });
+    if (!checked.length) { alert('Отметьте чекбоксы'); return; }
+    closeGeozonePanel();
+    clearOpsTracks();
+    var allBounds = [];
+    var colors = ['#e67e22', '#2ecc71', '#3498db', '#e74c3c', '#9b59b6', '#1abc9c', '#f39c12', '#e91e63'];
+    checked.forEach(function(idx, ci) {
+        var o = _opsSearchCache[idx];
+        if (!o || !o.track_data) return;
+        var track;
+        try { track = JSON.parse(o.track_data); } catch(e) { return; }
+        if (!track || track.length < 2) return;
+        var latlngs = track.map(function(p) { return [p.lat, p.lon]; });
+        var color = colors[ci % colors.length];
+        var polyline = L.polyline(latlngs, {color: color, weight: 4, opacity: 0.85}).addTo(map);
+        var popup = '<b>' + escapeHtml(o.op_type || '') + '</b><br>' +
+            (o.op_date || '') + '<br>' +
+            (o.operator ? 'Механизатор: ' + escapeHtml(o.operator) + '<br>' : '') +
+            (o.machinery ? 'Агрегат: ' + escapeHtml(o.machinery) + '<br>' : '') +
+            (o.zone_name ? 'Поле: ' + escapeHtml(o.zone_name) : '');
+        polyline.bindPopup(popup);
+        opTrackLayers['sel_' + idx] = polyline;
+        allBounds.push(polyline.getBounds());
+    });
+    if (allBounds.length) {
+        var combined = L.latLngBounds(allBounds[0]);
+        allBounds.forEach(function(b) { combined.extend(b); });
+        map.fitBounds(combined.pad(0.15));
+    }
 }
 
 function clearOpsTracks() {
