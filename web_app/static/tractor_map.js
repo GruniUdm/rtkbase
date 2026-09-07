@@ -591,7 +591,6 @@ function editGeozone(id) {
     $('#editZoneName').val(z.name || '');
     $('#editZoneCrop').val(z.crop || '');
     $('#editZonePlanted').val(z.planted_date || '');
-    $('#editZoneChemDate').val(z.last_chemical || '');
     $('#editZoneChemName').val(z.chemical_name || '');
     $('#gpSaveMsg').text('');
     openGeozonePanel(id);
@@ -1472,7 +1471,6 @@ function saveEditZone() {
         name: $('#editZoneName').val(),
         crop: $('#editZoneCrop').val(),
         planted_date: $('#editZonePlanted').val(),
-        last_chemical: $('#editZoneChemDate').val(),
         chemical_name: $('#editZoneChemName').val()
     };
     fetch('/api/geozones/' + id, {
