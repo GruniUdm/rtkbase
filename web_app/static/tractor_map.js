@@ -199,17 +199,22 @@ $(document).ready(function () {
 
     var gzList = document.getElementById('geozoneList');
     if (gzList) {
+        gzList._lastClickZone = null;
+        gzList._lastClickTime = 0;
         gzList.addEventListener('click', function(e) {
             var item = e.target.closest('.geozone-item');
             if (!item || e.target.tagName === 'INPUT' || e.target.classList.contains('geozone-del')) return;
             var zid = item.getAttribute('data-zone-id');
-            if (zid) focusGeozone(zid);
-        });
-        gzList.addEventListener('dblclick', function(e) {
-            var item = e.target.closest('.geozone-item');
-            if (!item || e.target.tagName === 'INPUT' || e.target.classList.contains('geozone-del')) return;
-            var zid = item.getAttribute('data-zone-id');
-            if (zid) editGeozone(zid);
+            if (!zid) return;
+            var now = Date.now();
+            if (gzList._lastClickZone === zid && now - gzList._lastClickTime < 400) {
+                gzList._lastClickZone = null;
+                editGeozone(zid);
+                return;
+            }
+            gzList._lastClickZone = zid;
+            gzList._lastClickTime = now;
+            focusGeozone(zid);
         });
     }
 });
