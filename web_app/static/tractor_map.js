@@ -196,6 +196,22 @@ $(document).ready(function () {
 
     // Fetch known tractors on page load
     fetchKnownTractors();
+
+    var gzList = document.getElementById('geozoneList');
+    if (gzList) {
+        gzList.addEventListener('click', function(e) {
+            var item = e.target.closest('.geozone-item');
+            if (!item || e.target.tagName === 'INPUT' || e.target.classList.contains('geozone-del')) return;
+            var zid = item.getAttribute('data-zone-id');
+            if (zid) focusGeozone(zid);
+        });
+        gzList.addEventListener('dblclick', function(e) {
+            var item = e.target.closest('.geozone-item');
+            if (!item || e.target.tagName === 'INPUT' || e.target.classList.contains('geozone-del')) return;
+            var zid = item.getAttribute('data-zone-id');
+            if (zid) editGeozone(zid);
+        });
+    }
 });
 
 // -------- Geozone Drawing --------
@@ -376,7 +392,7 @@ function renderGeozoneList() {
         var z = geozoneLayers[id].data;
         var checked = geozoneLayers[id]._hide ? '' : ' checked';
         var isActive = activeTrackZone === id ? ' active-zone' : '';
-        html += '<div class="geozone-item' + isActive + '" onclick="focusGeozone(\'' + id + '\')" ondblclick="event.stopPropagation();editGeozone(\'' + id + '\')">' +
+        html += '<div class="geozone-item' + isActive + '" data-zone-id="' + id + '">' +
             '<input type="checkbox"' + checked + ' onclick="event.stopPropagation();" onchange="toggleGeozone(\'' + id + '\');" style="vertical-align:middle;margin-right:4px;">' +
             '<span class="geozone-color-dot" style="background:' + z.color + '"></span>' +
             escapeHtml(z.name) +

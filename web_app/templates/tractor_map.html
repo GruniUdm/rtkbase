@@ -52,7 +52,7 @@
     .tractor-item .tractor-header { cursor: pointer; }
     .tractor-item .tractor-header:hover { background: #f5f5f5; }
     .tractor-item.offline { opacity: 0.6; }
-    .tractor-item .expand-icon { cursor: pointer; float: right; font-size: 0.8em; }
+    .tractor-item .expand-icon { cursor: pointer; display: inline-block; font-size: 0.8em; margin-right: 4px; }
     .tractor-sessions { background: #f9f9f9; border-radius: 4px; margin: 2px 0; }
     .tractor-sessions .btn { line-height: 1.2; }
 </style>
@@ -471,6 +471,6 @@
 <script>
 var baseCoordinates = {{ base_coordinates|tojson }};
 </script>
-<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5053') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5054') }}"></script>
 {% endblock %}
 
