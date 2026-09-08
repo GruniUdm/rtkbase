@@ -3,6 +3,7 @@ var tractorMarkers = {};
 var tractorTracks = {};
 var trackColorLayers = {};
 var trackRawPoints = {};
+var _trackMapLegend = null;
 var trackHidden = {};
 var trackLoadSeq = {};
 var trackLastReload = {};
@@ -2073,6 +2074,7 @@ function applyTrackColor(key) {
             mk.bindTooltip((_fixQualLabels[q] !== undefined ? 'Fix: ' + _fixQualLabels[q] : 'Fix: ' + q));
             group.addLayer(mk);
         });
+        showTrackColorLegend('q');
     } else {
         var vals = pts.map(function(p) { return _pointParamValue(p, param); });
         var min = Math.min.apply(null, vals);
@@ -2085,9 +2087,49 @@ function applyTrackColor(key) {
             mk.bindTooltip(param === 'alt' ? (v.toFixed(1) + ' м') : (param === 's' ? Math.round(v) + ' спутн' : v.toFixed(1)));
             group.addLayer(mk);
         });
+        showTrackColorLegend(param, min, max);
     }
     group.addTo(map);
     trackColorLayers[key] = group;
+}
+
+function showTrackColorLegend(param, min, max) {
+    if (_trackMapLegend) {
+        _trackMapLegend.remove();
+        _trackMapLegend = null;
+    }
+    var legend = L.control({position: 'bottomright'});
+    legend.onAdd = function() {
+        var div = L.DomUtil.create('div');
+        div.style.background = '#fff';
+        div.style.padding = '6px 10px';
+        div.style.borderRadius = '4px';
+        div.style.boxShadow = '0 1px 5px rgba(0,0,0,0.4)';
+        div.style.fontSize = '12px';
+        div.style.lineHeight = '1.5';
+        if (param === 'q') {
+            var clsHtml = '';
+            var seen = {};
+            for (var q in _fixQualLabels) {
+                if (seen[_fixQualLabels[q]]) continue;
+                seen[_fixQualLabels[q]] = true;
+                clsHtml += '<div style="white-space:nowrap;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + _fixQualColors[q] + ';margin-right:6px;"></span>' + _fixQualLabels[q] + '</div>';
+            }
+            div.innerHTML = '<b>Качество фикса</b>' + clsHtml;
+        } else {
+            var label = param === 'alt' ? 'Высота' : 'Спутники';
+            var unit = param === 'alt' ? ' м' : '';
+            div.innerHTML = '<b>' + label + '</b><br>' +
+                '<div style="display:flex;align-items:center;">' +
+                '<span>' + Math.round(min) + unit + '</span>' +
+                '<div style="width:18px;height:70px;display:inline-block;vertical-align:middle;border:1px solid #ccc;margin:0 5px;background:linear-gradient(to top,' +
+                _gradColor(1) + ',' + _gradColor(0.75) + ',' + _gradColor(0.5) + ',' + _gradColor(0.25) + ',' + _gradColor(0) + ');border-radius:2px;"></div>' +
+                '<span>' + Math.round(max) + unit + '</span></div>';
+        }
+        return div;
+    };
+    legend.addTo(map);
+    _trackMapLegend = legend;
 }
 
 function toggleTrackPoints(key) {
@@ -2105,6 +2147,10 @@ function resetTrackColorL(key) {
     if (grp) {
         map.removeLayer(grp);
         delete trackColorLayers[key];
+    }
+    if (!Object.keys(trackColorLayers).length && _trackMapLegend) {
+        _trackMapLegend.remove();
+        _trackMapLegend = null;
     }
 }
 
