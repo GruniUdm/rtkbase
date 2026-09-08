@@ -1,6 +1,8 @@
 ﻿var map;
 var tractorMarkers = {};
 var tractorTracks = {};
+var trackColorLayers = {};
+var trackRawPoints = {};
 var trackHidden = {};
 var trackLoadSeq = {};
 var trackLastReload = {};
@@ -1827,6 +1829,8 @@ function deleteTractor(username) {
                     map.removeLayer(tractorTracks[username]);
                     delete tractorTracks[username];
                 }
+                resetTrackColorL(username);
+                delete trackRawPoints[username];
                 delete trackHidden[username];
                 delete trackLoadSeq[username];
                 // Remove session layers
@@ -1834,6 +1838,7 @@ function deleteTractor(username) {
                     if (key.startsWith(username + '_')) {
                         map.removeLayer(sessionTrackLayers[key]);
                         delete sessionTrackLayers[key];
+                        resetTrackColorL(key);
                     }
                 }
             } else {
@@ -1876,6 +1881,9 @@ function loadTrack(username) {
                 weight: 2,
                 opacity: 0.6
             });
+            trackRawPoints[username] = points;
+            polyline._points = points;
+            attachTrackColor(polyline, username, 'track');
             var d = calcTrackDistance(latlngs);
             polyline.bindTooltip(trackTooltip(d), {sticky: true});
             tractorTracks[username] = polyline;
@@ -1901,6 +1909,9 @@ function loadAndShowTrack(ip) {
                 weight: 2,
                 opacity: 0.6
             }).addTo(map);
+            trackRawPoints[ip] = points;
+            polyline._points = points;
+            attachTrackColor(polyline, ip, 'track');
             var d = calcTrackDistance(latlngs);
             polyline.bindTooltip(trackTooltip(d), {sticky: true});
             tractorTracks[ip] = polyline;
@@ -1923,6 +1934,177 @@ function toggleTrack(username) {
         map.removeLayer(poly);
     } else {
         map.addLayer(poly);
+    }
+}
+
+// -------- Track coloring by parameter --------
+
+var _trackColorParams = {
+    alt: {label: 'Высота', unit: ' м'},
+    s: {label: 'Спутники', unit: ''},
+    h: {label: 'HDOP', unit: ''},
+    q: {label: 'Качество фикса', unit: ''}
+};
+
+function _trackColorRange(v, min, max) {
+    if (max <= min) return 0;
+    return (v - min) / (max - min);
+}
+
+function _gradColor(t) {
+    // blue -> cyan -> green -> yellow -> red
+    var stops = [
+        [0, [52, 152, 219]],
+        [0.25, [94, 202, 173]],
+        [0.5, [46, 204, 113]],
+        [0.75, [241, 196, 15]],
+        [1, [231, 76, 60]]
+    ];
+    var i = 0;
+    while (i < stops.length - 1 && t > stops[i + 1][0]) i++;
+    var lo = stops[i][0], hi = stops[i + 1][0];
+    var f = hi > lo ? (t - lo) / (hi - lo) : 0;
+    var c1 = stops[i][1], c2 = stops[i + 1][1];
+    var r = Math.round(c1[0] + (c2[0] - c1[0]) * f);
+    var g = Math.round(c1[1] + (c2[1] - c1[1]) * f);
+    var b = Math.round(c1[2] + (c2[2] - c1[2]) * f);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+var _fixQualColors = {
+    0: '#e74c3c', 1: '#e74c3c', 2: '#f39c12',
+    3: '#f39c12', 4: '#27ae60', 5: '#2ecc71'
+};
+
+var _fixQualLabels = {0: 'Invalid', 1: 'SPS', 2: 'DGPS', 3: 'DGPS', 4: 'RTK Fix', 5: 'RTK Float'};
+
+function _pointParamValue(p, param) {
+    if (param === 'alt') return parseFloat(p.alt != null ? p.alt : (p.altitude || 0));
+    if (param === 's') return parseInt(p.s != null ? p.s : (p.satellites || 0));
+    if (param === 'h') return parseFloat(p.h != null ? p.h : (p.hdop || 0));
+    if (param === 'q') return parseInt(p.q != null ? p.q : (p.quality || 0));
+    return 0;
+}
+
+function attachTrackColor(layer, key, kind) {
+    if (!layer || layer._colorBound) return;
+    layer._colorBound = true;
+    layer._colorKey = key;
+    layer._colorKind = kind;
+    layer.on('dblclick', function(e) {
+        L.DomEvent.stopPropagation(e);
+        L.DomEvent.preventDefault(e);
+        openTrackColorPopup(layer, e.latlng);
+    });
+}
+
+function openTrackColorPopup(layer, latlng) {
+    var key = layer._colorKey;
+    var html = '<div style="min-width:220px;">' +
+        '<div style="font-weight:600;font-size:0.95em;margin-bottom:4px;">Цвет трека</div>' +
+        '<select id="tcParam_' + key + '" onchange="updateTrackColorLegend(\'' + key + '\',this.value)" style="width:100%;font-size:0.85em;">' +
+        '<option value="alt">Высота</option>' +
+        '<option value="s">Спутники</option>' +
+        '<option value="q">Качество фикса</option>' +
+        '</select>' +
+        '<div id="tcLegend_' + key + '" style="margin:6px 0;font-size:0.75em;color:#666;"></div>' +
+        '<div style="display:flex;gap:4px;margin-top:4px;">' +
+        '<button class="btn btn-xs btn-success" onclick="applyTrackColor(\'' + key + '\')" style="font-size:0.75em;padding:0 6px;">Применить</button> ' +
+        '<button class="btn btn-xs btn-outline-secondary" onclick="toggleTrackPoints(\'' + key + '\')" style="font-size:0.75em;padding:0 6px;">Скрыть точки</button> ' +
+        '<button class="btn btn-xs btn-outline-danger" onclick="resetTrackColorL(\'' + key + '\')" style="font-size:0.75em;padding:0 6px;">Сбросить</button>' +
+        '</div></div>';
+    layer.unbindTooltip();
+    layer.bindPopup(html, {className: 'track-color-popup'});
+    layer.openPopup(latlng);
+    layer.once('popupclose', function() {
+        var pts = layer._points;
+        if (!pts) return;
+        var d = calcTrackDistance(pts.map(function(p) { return [p.lat, p.lon]; }));
+        if (d > 0) layer.bindTooltip(trackTooltip(d), {sticky: true});
+    });
+    updateTrackColorLegend(key, 'alt');
+}
+
+function updateTrackColorLegend(key, param) {
+    var el = document.getElementById('tcLegend_' + key);
+    if (!el) return;
+    var points = trackRawPoints[key];
+    if (!points && tractorTracks[key]) points = tractorTracks[key]._points;
+    if (!points && sessionTrackLayers[key]) points = sessionTrackLayers[key]._points;
+    if (!points) return;
+    if (param === 'q') {
+        var html = '';
+        for (var q in _fixQualLabels) {
+            html += '<span style="color:' + _fixQualColors[q] + ';">&#11044;</span> ' + _fixQualLabels[q] + ' &nbsp;';
+        }
+        el.innerHTML = html;
+        return;
+    }
+    var vals = points.map(function(p) { return _pointParamValue(p, param); });
+    var min = Math.min.apply(null, vals);
+    var max = Math.max.apply(null, vals);
+    el.innerHTML = '<span style="color:' + _gradColor(0) + ';">&#11044;</span> ' +
+        '<span style="display:inline-block;width:90px;height:8px;margin:0 4px;vertical-align:middle;background:linear-gradient(to right,' +
+        _gradColor(0) + ',' + _gradColor(0.5) + ',' + _gradColor(1) + ');border-radius:2px;"></span>' +
+        '<span style="color:' + _gradColor(1) + ';">&#11044;</span>' +
+        ' <b>' + min.toFixed(0) + '</b> \u2026 <b>' + max.toFixed(0) + '</b>' + (param === 'alt' ? ' м' : '');
+}
+
+function applyTrackColor(key) {
+    var layer = tractorTracks[key];
+    if (!layer) {
+        for (var k2 in sessionTrackLayers) {
+            if (k2 === key) { layer = sessionTrackLayers[k2]; break; }
+        }
+    }
+    var raw = trackRawPoints[key] || (layer && layer._points) || null;
+    if (!layer || !raw) { alert('Нет данных трека'); return; }
+    var sel = document.getElementById('tcParam_' + key);
+    var param = sel ? sel.value : 'alt';
+    if (layer.isPopupOpen && layer.isPopupOpen()) layer.closePopup();
+    resetTrackColorL(key);
+    var pts = _simplifyTrack(raw, 1500);
+    var group = L.layerGroup();
+    if (param === 'q') {
+        pts.forEach(function(p) {
+            var q = _pointParamValue(p, 'q');
+            var c = _fixQualColors[q] || '#95a5a6';
+            var mk = L.circleMarker([p.lat, p.lon], {radius: 4, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.9});
+            mk.bindTooltip((_fixQualLabels[q] !== undefined ? 'Fix: ' + _fixQualLabels[q] : 'Fix: ' + q));
+            group.addLayer(mk);
+        });
+    } else {
+        var vals = pts.map(function(p) { return _pointParamValue(p, param); });
+        var min = Math.min.apply(null, vals);
+        var max = Math.max.apply(null, vals);
+        pts.forEach(function(p) {
+            var t = _trackColorRange(_pointParamValue(p, param), min, max);
+            var c = _gradColor(t);
+            var mk = L.circleMarker([p.lat, p.lon], {radius: 4, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.85});
+            var v = _pointParamValue(p, param);
+            mk.bindTooltip(param === 'alt' ? (v.toFixed(1) + ' м') : (param === 's' ? Math.round(v) + ' спутн' : v.toFixed(1)));
+            group.addLayer(mk);
+        });
+    }
+    group.addTo(map);
+    trackColorLayers[key] = group;
+}
+
+function toggleTrackPoints(key) {
+    var grp = trackColorLayers[key];
+    if (!grp) return;
+    if (map.hasLayer(grp)) {
+        map.removeLayer(grp);
+    } else {
+        grp.addTo(map);
+    }
+}
+
+function resetTrackColorL(key) {
+    var grp = trackColorLayers[key];
+    if (grp) {
+        map.removeLayer(grp);
+        delete trackColorLayers[key];
     }
 }
 
@@ -2895,6 +3077,7 @@ function showTrackSession(username, firstT, lastT, btn) {
     if (sessionTrackLayers[key]) {
         map.removeLayer(sessionTrackLayers[key]);
         delete sessionTrackLayers[key];
+        resetTrackColorL(key);
         btn.textContent = 'Show';
         btn.className = 'btn btn-sm btn-outline-primary';
         return;
@@ -2919,6 +3102,9 @@ function showTrackSession(username, firstT, lastT, btn) {
                 weight: 3,
                 opacity: 0.8
             }).addTo(map);
+            polyline._points = filtered;
+            var sesKey = username + '_' + firstT;
+            attachTrackColor(polyline, sesKey, 'session');
             var d = 0;
             for (var i = 1; i < latlngs.length; i++) d += haversineDist(latlngs[i-1], latlngs[i]);
             var distText = d >= 1000 ? (d / 1000).toFixed(2) + ' km' : d.toFixed(0) + ' m';

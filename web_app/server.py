@@ -1153,7 +1153,9 @@ def tractor_track_last_session(ip):
     if not sessions:
         return json.dumps([])
     last = sessions[-1]
-    simplified = [{'t': p['t'], 'lat': p['lat'], 'lon': p['lon']} for p in last]
+    simplified = [{'t': p['t'], 'lat': p['lat'], 'lon': p['lon'],
+                   'q': p.get('quality', p.get('q', 0)), 's': p.get('satellites', p.get('s', 0)),
+                   'alt': p.get('altitude', p.get('alt', 0))} for p in last]
     return json.dumps(simplified)
 
 @app.route('/api/tractor_track/<ip>/last')
