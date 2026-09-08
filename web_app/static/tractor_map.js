@@ -2121,10 +2121,11 @@ function showTrackColorLegend(param, min, max) {
             var unit = param === 'alt' ? ' м' : '';
             div.innerHTML = '<b>' + label + '</b><br>' +
                 '<div style="display:flex;align-items:center;">' +
-                '<span>' + Math.round(min) + unit + '</span>' +
-                '<div style="width:18px;height:70px;display:inline-block;vertical-align:middle;border:1px solid #ccc;margin:0 5px;background:linear-gradient(to top,' +
-                _gradColor(1) + ',' + _gradColor(0.75) + ',' + _gradColor(0.5) + ',' + _gradColor(0.25) + ',' + _gradColor(0) + ');border-radius:2px;"></div>' +
-                '<span>' + Math.round(max) + unit + '</span></div>';
+                '<div style="height:70px;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-end;margin-right:5px;">' +
+                '<span>' + Math.round(max) + unit + '</span>' +
+                '<span>' + Math.round(min) + unit + '</span></div>' +
+                '<div style="width:18px;height:70px;display:inline-block;vertical-align:middle;border:1px solid #ccc;background:linear-gradient(to top,' +
+                _gradColor(1) + ',' + _gradColor(0.75) + ',' + _gradColor(0.5) + ',' + _gradColor(0.25) + ',' + _gradColor(0) + ');border-radius:2px;"></div></div>';
         }
         return div;
     };
