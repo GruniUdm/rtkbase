@@ -944,6 +944,46 @@ try {
     }
 }
 
+function showGpOpOnMainMap(opId) {
+    var zoneId = currentZoneId;
+    if (!zoneId) return;
+    var ops = _fieldOpsCache[zoneId] || [];
+    var op = null;
+    for (var i = 0; i < ops.length; i++) {
+        if (ops[i].id === opId) { op = ops[i]; break; }
+    }
+    if (!op || !op.track_data) {
+        alert('Трек для этой работы сохранён не был');
+        return;
+    }
+    try {
+        var track = JSON.parse(op.track_data);
+        if (!track || track.length < 2) {
+            alert('Трек для этой работы пуст');
+            return;
+        }
+        var zone = geozoneLayers[zoneId];
+        if (!zone) { alert('Поле не найдено на карте'); return; }
+        closeGeozonePanel();
+        currentZoneId = null;
+        focusGeozone(zoneId);
+        var latlngs = track.map(function(p) { return [p.lat, p.lon]; });
+        var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
+        var popup = '<b>' + escapeHtml(op.op_type || '') + '</b><br>' +
+            (op.op_date || '') + '<br>' +
+            (op.operator ? 'Механизатор: ' + escapeHtml(op.operator) + '<br>' : '') +
+            (op.machinery ? 'Агрегат: ' + escapeHtml(op.machinery) + '<br>' : '') +
+            (op.material ? 'Препарат: ' + escapeHtml(op.material) + '<br>' : '') +
+            (zone.data.name ? 'Поле: ' + escapeHtml(zone.data.name) : '');
+        polyline.bindPopup(popup);
+        polyline.openPopup();
+        opTrackLayers[opId] = polyline;
+        map.fitBounds(polyline.getBounds().pad(0.15));
+    } catch (e) {
+        alert('Не удалось разобрать трек: ' + e.message);
+    }
+}
+
 function loadFieldOps(zoneId) {
     var el = document.getElementById('fieldOpsList');
     if (!el) return;
@@ -957,7 +997,7 @@ function loadFieldOps(zoneId) {
             }
             var html = '';
             ops.forEach(function(o) {
-                html += '<div class="op-item" style="padding:4px 0;border-bottom:1px solid #eee;font-size:0.88em;" data-op-id="' + o.id + '">';
+                html += '<div class="op-item" style="padding:4px 0;border-bottom:1px solid #eee;font-size:0.88em;" data-op-id="' + o.id + '" ondblclick="showGpOpOnMainMap(' + o.id + ')">';
                 html += '<div style="display:flex;justify-content:space-between;">';
                 html += '<span style="cursor:pointer;" onclick="showOpTrackOnMiniMap(' + o.id + ')" title="Показать трек на миникарте"><b>' + escapeHtml(o.op_type || '') + '</b> <span style="color:#666;">' + escapeHtml(o.op_date || '') + '</span></span>';
                 html += '<span style="color:#dc3545;cursor:pointer;font-weight:bold;padding-left:6px;" title="Удалить" onclick="deleteFieldOp(' + o.id + ')">&times;</span>';
