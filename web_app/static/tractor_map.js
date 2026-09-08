@@ -967,8 +967,15 @@ function showGpOpOnMainMap(opId) {
         closeGeozonePanel();
         currentZoneId = null;
         focusGeozone(zoneId);
+        resetTrackColorL('op_' + opId);
+        if (opTrackLayers[opId]) {
+            map.removeLayer(opTrackLayers[opId]);
+            delete opTrackLayers[opId];
+        }
         var latlngs = track.map(function(p) { return [p.lat, p.lon]; });
         var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
+        polyline._points = track;
+        attachTrackColor(polyline, 'op_' + opId, 'op');
         var popup = '<b>' + escapeHtml(op.op_type || '') + '</b><br>' +
             (op.op_date || '') + '<br>' +
             (op.operator ? 'Механизатор: ' + escapeHtml(op.operator) + '<br>' : '') +
@@ -1217,6 +1224,7 @@ function clearOpsTracks() {
     for (var k in opTrackLayers) {
         map.removeLayer(opTrackLayers[k]);
         delete opTrackLayers[k];
+        resetTrackColorL('op_' + k);
     }
 }
 
@@ -2072,6 +2080,7 @@ function updateTrackColorLegend(key, param) {
     var points = trackRawPoints[key];
     if (!points && tractorTracks[key]) points = tractorTracks[key]._points;
     if (!points && sessionTrackLayers[key]) points = sessionTrackLayers[key]._points;
+    if (!points && key.indexOf('op_') === 0 && opTrackLayers[key.slice(3)]) points = opTrackLayers[key.slice(3)]._points;
     if (!points) return;
     if (param === 'q') {
         var html = '';
@@ -2097,6 +2106,9 @@ function applyTrackColor(key) {
         for (var k2 in sessionTrackLayers) {
             if (k2 === key) { layer = sessionTrackLayers[k2]; break; }
         }
+    }
+    if (!layer) {
+        layer = opTrackLayers[key.indexOf('op_') === 0 ? key.slice(3) : key];
     }
     var raw = trackRawPoints[key] || (layer && layer._points) || null;
     if (!layer || !raw) { alert('Нет данных трека'); return; }
