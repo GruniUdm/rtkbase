@@ -2177,7 +2177,7 @@ function showTrackColorLegend(param, min, max) {
                 '<span>' + Math.round(max) + unit + '</span>' +
                 '<span>' + Math.round(min) + unit + '</span></div>' +
                 '<div style="width:18px;height:70px;display:inline-block;vertical-align:middle;border:1px solid #ccc;background:linear-gradient(to top,' +
-                _gradColor(1) + ',' + _gradColor(0.75) + ',' + _gradColor(0.5) + ',' + _gradColor(0.25) + ',' + _gradColor(0) + ');border-radius:2px;"></div></div>';
+                _gradColor(0) + ',' + _gradColor(0.25) + ',' + _gradColor(0.5) + ',' + _gradColor(0.75) + ',' + _gradColor(1) + ');border-radius:2px;"></div></div>';
         }
         return div;
     };
