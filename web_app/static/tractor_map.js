@@ -2330,6 +2330,7 @@ function showAllNdviOverlays() {
 }
 
 function hideAllNdviOverlays() {
+    ndviGeneration++;
     _pendingNdviAdds = {};
     for (var zid in ndviOverlays) {
         map.removeLayer(ndviOverlays[zid]);
