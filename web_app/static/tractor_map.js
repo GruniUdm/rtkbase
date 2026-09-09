@@ -1938,7 +1938,12 @@ function loadTrack(username) {
             tractorTracks[username] = polyline;
             polyline._hide = !!trackHidden[username];
             if (!polyline._hide) {
-                polyline.addTo(map);
+                var colored = trackColorLayers[username] && map.hasLayer(trackColorLayers[username]);
+                if (!colored) {
+                    polyline.addTo(map);
+                } else {
+                    trackColorLayers[username]._colorBaseLayer = polyline;
+                }
             }
         });
 }
@@ -2143,6 +2148,8 @@ function applyTrackColor(key) {
     }
     group.addTo(map);
     trackColorLayers[key] = group;
+    group._colorBaseLayer = layer;
+    map.removeLayer(layer);
 }
 
 function showTrackColorLegend(param, min, max) {
@@ -2190,7 +2197,9 @@ function toggleTrackPoints(key) {
     if (!grp) return;
     if (map.hasLayer(grp)) {
         map.removeLayer(grp);
-    } else {
+        if (grp._colorBaseLayer) map.addLayer(grp._colorBaseLayer);
+    } else if (grp._colorBaseLayer) {
+        map.removeLayer(grp._colorBaseLayer);
         grp.addTo(map);
     }
 }
@@ -2199,6 +2208,7 @@ function resetTrackColorL(key) {
     var grp = trackColorLayers[key];
     if (grp) {
         map.removeLayer(grp);
+        if (grp._colorBaseLayer) map.addLayer(grp._colorBaseLayer);
         delete trackColorLayers[key];
     }
     if (!Object.keys(trackColorLayers).length && _trackMapLegend) {
