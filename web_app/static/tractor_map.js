@@ -1991,30 +1991,15 @@ function toggleTrack(username) {
     }
 }
 
-var _allTrackColors = ['#e67e22', '#2ecc71', '#e74c3c', '#9b59b6', '#16a085', '#f39c12', '#2980b9', '#d35400', '#27ae60', '#8e44ad'];
+var _allTrackKey = function(username) { return username + '_all'; };
 
 function showAllTractorTracks(username) {
-    var shown = [];
-    for (var k in sessionTrackLayers) {
-        if (k.indexOf(username + '_') === 0) shown.push(k);
-    }
-    if (shown.length) {
-        shown.forEach(function(key) {
-            map.removeLayer(sessionTrackLayers[key]);
-            delete sessionTrackLayers[key];
-            resetTrackColorL(key);
-        });
-        var listEl2 = document.getElementById('t_sess_' + username.replace(/[^a-zA-Z0-9]/g, '_'));
-        if (listEl2) {
-            shown.forEach(function(key) {
-                var firstT = key.slice(username.length + 1);
-                var btn = listEl2.querySelector('[onclick*="showTrackSession(\'' + username + '\', ' + firstT + '"]');
-                if (btn) {
-                    btn.textContent = 'Show';
-                    btn.className = 'btn btn-sm btn-outline-primary';
-                }
-            });
-        }
+    var allKey = _allTrackKey(username);
+    var layer = sessionTrackLayers[allKey];
+    if (layer) {
+        map.removeLayer(layer);
+        delete sessionTrackLayers[allKey];
+        resetTrackColorL(allKey);
         return;
     }
     var listEl = document.getElementById('t_sess_' + username.replace(/[^a-zA-Z0-9]/g, '_'));
@@ -2028,45 +2013,31 @@ function showAllTractorTracks(username) {
                 tasks.push(
                     fetch('/api/tractor_track/' + encodeURIComponent(username) + '?from=' + s.first_t + '&to=' + s.last_t)
                         .then(function(r) { return r.json(); })
-                        .then(function(points) { return {session: s, points: points}; })
                 );
             });
             Promise.all(tasks).then(function(results) {
-                var bounds = [];
-                var colorIdx = 0;
-                results.forEach(function(res) {
-                    var s = res.session;
-                    var points = res.points;
-                    if (!points || points.length < 2) return;
-                    var latlngs = points.map(function(p) { return [p.lat, p.lon]; });
-                    var polyline = L.polyline(latlngs, {
-                        color: _allTrackColors[colorIdx++ % _allTrackColors.length],
-                        weight: 3,
-                        opacity: 0.8
-                    }).addTo(map);
-                    polyline._points = points;
-                    var sesKey = username + '_' + s.first_t;
-                    attachTrackColor(polyline, sesKey, 'session');
-                    var d = 0;
-                    for (var i = 1; i < latlngs.length; i++) d += haversineDist(latlngs[i - 1], latlngs[i]);
-                    var distText = d >= 1000 ? (d / 1000).toFixed(2) + ' km' : d.toFixed(0) + ' m';
-                    polyline.bindTooltip(username + ' ' + s.date + ' ' + s.start_time + '→' + s.end_time + ' ' + distText, {sticky: true});
-                    sessionTrackLayers[sesKey] = polyline;
-                    bounds.push(polyline.getBounds());
-                });
-                if (bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.1));
-                if (listEl) {
-                    if (listEl.style.display === 'none') toggleTractorSessions(username);
-                    for (var kk in sessionTrackLayers) {
-                        if (kk.indexOf(username + '_') !== 0) continue;
-                        var firstT = kk.slice(username.length + 1);
-                        var btn = listEl.querySelector('[onclick*="showTrackSession(\'' + username + '\', ' + firstT + '"]');
-                        if (btn) {
-                            btn.textContent = 'Hide';
-                            btn.className = 'btn btn-sm btn-outline-danger';
-                        }
+                var merged = [];
+                results.forEach(function(points) {
+                    if (points && points.length) {
+                        points.forEach(function(p) { merged.push(p); });
                     }
-                }
+                });
+                if (merged.length < 2) { alert('Нет данных треков для ' + username); return; }
+                merged.sort(function(a, b) { return (a.t || 0) - (b.t || 0); });
+                var latlngs = merged.map(function(p) { return [p.lat, p.lon]; });
+                var polyline = L.polyline(latlngs, {
+                    color: '#e67e22',
+                    weight: 2.5,
+                    opacity: 0.8
+                }).addTo(map);
+                polyline._points = merged;
+                attachTrackColor(polyline, allKey, 'track');
+                var d = 0;
+                for (var i = 1; i < latlngs.length; i++) d += haversineDist(latlngs[i - 1], latlngs[i]);
+                var distText = d >= 1000 ? (d / 1000).toFixed(2) + ' km' : d.toFixed(0) + ' m';
+                polyline.bindTooltip(username + ' (\u0412\u0441\u0435 \u0442\u0440\u0435\u043a\u0438) ' + merged.length + ' pts ' + distText, {sticky: true});
+                sessionTrackLayers[allKey] = polyline;
+                map.fitBounds(polyline.getBounds().pad(0.1));
             });
         })
         .catch(function(e) { console.error('showAllTractorTracks error:', e); });
