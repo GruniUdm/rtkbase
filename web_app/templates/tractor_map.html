@@ -384,36 +384,6 @@
                                 <div style="font-size:0.75em;color:#888;margin-top:3px;">Двойной клик по мини-карте — показать на главной карте</div>
                             </div>
                         </div>
-                        <div style="border-top:1px solid #ddd;margin-top:8px;padding-top:8px;">
-                            <div style="font-size:0.85em;font-weight:600;margin-bottom:4px;">Зависимость NDVI от показателей</div>
-                            <div style="display:flex;gap:4px;">
-                                <select class="form-control form-control-sm" id="agroNdviDate" style="flex:1 1 50%;min-width:0;">
-                                    <option value="">— Дата снимка —</option>
-                                </select>
-                                <select class="form-control form-control-sm" id="agroNdviParam" style="flex:1 1 50%;min-width:0;">
-                                    <option value="ph">pH</option>
-                                    <option value="om">Гумус, %</option>
-                                    <option value="n">N</option>
-                                    <option value="p">P</option>
-                                    <option value="k">K</option>
-                                    <option value="eko">ЕКО</option>
-                                    <option value="ca">Ca</option>
-                                    <option value="mg">Mg</option>
-                                    <option value="al">Al</option>
-                                    <option value="fe">Fe</option>
-                                    <option value="clay">Глина, %</option>
-                                </select>
-                            </div>
-                            <div style="display:flex;gap:4px;margin-top:4px;">
-                                <button class="btn btn-sm btn-info" style="flex:1;" onclick="buildAgroNdviCorr()">Построить</button>
-                                <button class="btn btn-sm btn-outline-danger" onclick="hideAgroNdviCorr()">Скрыть</button>
-                            </div>
-                            <div id="agroNdviResult" style="margin-top:6px;display:none;">
-                                <div id="agroNdviTitle" style="font-size:0.78em;color:#555;"></div>
-                                <canvas id="agroNdviCanvas" width="260" height="200" style="width:100%;border:1px solid #ddd;background:#fff;margin-top:4px;"></canvas>
-                                <div id="agroNdviStats" style="font-size:0.8em;margin-top:4px;"></div>
-                            </div>
-                        </div>
                     </div>
                 </div>
 
@@ -545,6 +515,6 @@
 <script>
 var baseCoordinates = {{ base_coordinates|tojson }};
 </script>
-<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5080') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5077') }}"></script>
 {% endblock %}
 

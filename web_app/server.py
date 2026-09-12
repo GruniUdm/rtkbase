@@ -1342,18 +1342,6 @@ def list_agro_samples():
     return json.dumps(gpkg_helper.list_agro_samples(_db, zone_id or None))
 
 
-@app.route('/api/agro_ndvi_corr')
-@login_required
-def agro_ndvi_corr():
-    ensure_migrated()
-    gpkg_helper.ensure_agro_samples_table(_db)
-    zone_id = request.args.get('zone_id')
-    if not zone_id:
-        return json.dumps({'error': 'zone_id required'}), 400
-    samples = gpkg_helper.list_agro_samples(_db, zone_id)
-    return json.dumps(ndvi_helper.build_agro_ndvi_corr(zone_id, request.args.get('scene_date'), samples))
-
-
 @app.route('/api/field-ops/search')
 @login_required
 def search_field_ops():
