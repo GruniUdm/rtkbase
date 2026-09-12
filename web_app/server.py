@@ -630,6 +630,10 @@ def ensure_migrated():
         migrate_geojson_to_gpkg()
     except Exception as e:
         print('GeoJSON migration error:', e)
+    try:
+        gpkg_helper.ensure_agro_samples_table(_db)
+    except Exception as e:
+        print('Agro samples migration error:', e)
 
 
 login=LoginManager(app)
@@ -1327,6 +1331,15 @@ def list_field_ops(zone_id):
     _sel = ', '.join(_FIELD_OP_COLS)
     rows = _db.execute(f'SELECT {_sel} FROM field_ops WHERE zone_id=? ORDER BY op_date DESC, id DESC', (zone_id,)).fetchall()
     return json.dumps([_field_op_row(r) for r in rows])
+
+
+@app.route('/api/agro_samples')
+@login_required
+def list_agro_samples():
+    ensure_migrated()
+    gpkg_helper.ensure_agro_samples_table(_db)
+    zone_id = request.args.get('zone_id')
+    return json.dumps(gpkg_helper.list_agro_samples(_db, zone_id or None))
 
 
 @app.route('/api/field-ops/search')

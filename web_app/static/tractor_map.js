@@ -600,6 +600,7 @@ function editGeozone(id) {
     loadNdviStatus(id);
     loadYieldSummary(id);
     loadFieldOps(id);
+    loadAgroSamples(id);
 }
 
 function openGeozonePanel(id) {
@@ -635,6 +636,7 @@ function closeGeozonePanel() {
     _pendingAlertIp = null;
     _pendingAlertTrack = null;
     if (lastId) hideNdviOverlay(lastId);
+    hideAgroPoints();
     var p = document.getElementById('geozonePanel');
     if (p) p.style.display = 'none';
     var w = document.getElementById('weatherHistoryPanel');
@@ -2267,6 +2269,115 @@ function resetTrackColorL(key) {
         _trackMapLegend.remove();
         _trackMapLegend = null;
     }
+}
+
+// -------- Агрохимический анализ --------
+
+var _agroSamplesCache = {};
+var _agroPointsLayer = null;
+
+var _agroParamLabels = {
+    ph: 'pH', om: 'Гумус, %', n: 'N', p: 'P', k: 'K',
+    eko: 'ЕКО', ca: 'Ca', mg: 'Mg', al: 'Al', fe: 'Fe', clay: 'Глина, %'
+};
+var _agroParamUnits = {
+    ph: '', om: '%', n: '', p: '', k: '', eko: '', ca: '', mg: '', al: '', fe: '', clay: '%'
+};
+
+function _agroParamValue(s, param) {
+    var v = s[param];
+    return (v === null || v === undefined || v === '') ? null : parseFloat(v);
+}
+
+function loadAgroSamples(zoneId) {
+    var el = document.getElementById('agroStatus');
+    if (!el) return;
+    el.textContent = 'Загрузка...';
+    fetch('/api/agro_samples?zone_id=' + encodeURIComponent(zoneId))
+        .then(function(r) { return r.json(); })
+        .then(function(samples) {
+            _agroSamplesCache[zoneId] = samples || [];
+            if (currentZoneId !== zoneId) return;
+            if (!samples || !samples.length) {
+                el.textContent = 'Нет точек анализа для этого поля';
+            } else {
+                el.textContent = 'Точек анализа: ' + samples.length + ' — выберите показатель и нажмите «Показать»';
+            }
+        })
+        .catch(function() {
+            if (currentZoneId !== zoneId) return;
+            el.textContent = 'Ошибка загрузки точек анализа';
+        });
+}
+
+function showAgroPoints() {
+    var zoneId = currentZoneId;
+    if (!zoneId) return;
+    var samples = _agroSamplesCache[zoneId];
+    if (!samples || !samples.length) { alert('Нет точек анализа для этого поля'); return; }
+    var sel = document.getElementById('agroParam');
+    var param = sel ? sel.value : 'ph';
+    hideAgroPoints();
+    var group = L.layerGroup();
+    var vals = [];
+    samples.forEach(function(s) {
+        var v = _agroParamValue(s, param);
+        if (v !== null) vals.push(v);
+    });
+    var min = vals.length ? Math.min.apply(null, vals) : 0;
+    var max = vals.length ? Math.max.apply(null, vals) : 1;
+    samples.forEach(function(s) {
+        var v = _agroParamValue(s, param);
+        var t = (v === null) ? null : _trackColorRange(v, min, max);
+        var c = (t === null) ? '#95a5a6' : _gradColor(t);
+        var mk = L.circleMarker([s.lat, s.lon], {radius: 5, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.9});
+        var unit = _agroParamUnits[param] || '';
+        mk.bindTooltip((s.name || '') + '<br>' + (_agroParamLabels[param] || param) + ': <b>' + (v === null ? 'н/д' : (v.toString().replace('.', ',')) + ' ' + unit) + '</b>');
+        group.addLayer(mk);
+    });
+    group.addTo(map);
+    _agroPointsLayer = group;
+    showAgroColorLegend(param, min, max);
+}
+
+function hideAgroPoints() {
+    if (_agroPointsLayer) {
+        map.removeLayer(_agroPointsLayer);
+        _agroPointsLayer = null;
+    }
+    if (_trackMapLegend && !Object.keys(trackColorLayers).length) {
+        _trackMapLegend.remove();
+        _trackMapLegend = null;
+    }
+}
+
+function showAgroColorLegend(param, min, max) {
+    if (_trackMapLegend) {
+        _trackMapLegend.remove();
+        _trackMapLegend = null;
+    }
+    var label = _agroParamLabels[param] || param;
+    var unit = _agroParamUnits[param] || '';
+    var legend = L.control({position: 'bottomright'});
+    legend.onAdd = function() {
+        var div = L.DomUtil.create('div');
+        div.style.background = '#fff';
+        div.style.padding = '6px 10px';
+        div.style.borderRadius = '4px';
+        div.style.boxShadow = '0 1px 5px rgba(0,0,0,0.4)';
+        div.style.fontSize = '12px';
+        div.style.lineHeight = '1.5';
+        div.innerHTML = '<b>' + label + '</b><br>' +
+            '<div style="display:flex;align-items:center;">' +
+            '<div style="height:70px;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-end;margin-right:5px;">' +
+            '<span>' + (Number(max).toFixed(max >= 100 ? 0 : 1)) + ' ' + unit + '</span>' +
+            '<span>' + (Number(min).toFixed(max >= 100 ? 0 : 1)) + ' ' + unit + '</span></div>' +
+            '<div style="width:18px;height:70px;display:inline-block;vertical-align:middle;border:1px solid #ccc;background:linear-gradient(to top,' +
+            _gradColor(0) + ',' + _gradColor(0.25) + ',' + _gradColor(0.5) + ',' + _gradColor(0.75) + ',' + _gradColor(1) + ');border-radius:2px;"></div></div>';
+        return div;
+    };
+    legend.addTo(map);
+    _trackMapLegend = legend;
 }
 
 function createTractorMarker(username) {

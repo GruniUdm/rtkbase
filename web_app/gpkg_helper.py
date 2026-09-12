@@ -616,3 +616,63 @@ def delete_field_details_by_zone(conn, zone_id):
     _ensure_field_details_table(conn)
     conn.execute('DELETE FROM field_details WHERE zone_id=?', (zone_id,))
     conn.commit()
+
+
+### Agrochemical samples ###
+
+def ensure_agro_samples_table(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS agro_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        zone_id TEXT NOT NULL,
+        sample_id TEXT,
+        name TEXT,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        ph REAL,
+        om REAL,
+        n REAL,
+        p REAL,
+        k REAL,
+        eko REAL,
+        ca REAL,
+        mg REAL,
+        al REAL,
+        fe REAL,
+        clay REAL)''')
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agro_zone ON agro_samples(zone_id)")
+    conn.commit()
+
+def insert_agro_sample(conn, zone_id, sample):
+    conn.execute(
+        'INSERT INTO agro_samples (zone_id,sample_id,name,lat,lon,ph,om,n,p,k,eko,ca,mg,al,fe,clay) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        (zone_id, sample.get('sample_id'), sample.get('name'),
+         sample.get('lat'), sample.get('lon'),
+         sample.get('ph'), sample.get('om'), sample.get('n'), sample.get('p'),
+         sample.get('k'), sample.get('eko'), sample.get('ca'), sample.get('mg'),
+         sample.get('al'), sample.get('fe'), sample.get('clay')))
+    conn.commit()
+
+def list_agro_samples(conn, zone_id=None):
+    ensure_agro_samples_table(conn)
+    cols = ('id','zone_id','sample_id','name','lat','lon','ph','om','n','p','k','eko','ca','mg','al','fe','clay')
+    if zone_id:
+        cur = conn.execute('SELECT ' + ','.join(cols) + ' FROM agro_samples WHERE zone_id=? ORDER BY id', (zone_id,))
+    else:
+        cur = conn.execute('SELECT ' + ','.join(cols) + ' FROM agro_samples ORDER BY id')
+    rows = []
+    for r in cur:
+        d = dict(zip(cols, r))
+        for k in ('ph','om','n','p','k','eko','ca','mg','al','fe','clay'):
+            if d[k] is not None:
+                d[k] = round(float(d[k]), 4)
+        rows.append(d)
+    return rows
+
+def delete_agro_samples(conn, zone_id=None):
+    ensure_agro_samples_table(conn)
+    if zone_id:
+        conn.execute('DELETE FROM agro_samples WHERE zone_id=?', (zone_id,))
+    else:
+        conn.execute('DELETE FROM agro_samples')
+    conn.commit()

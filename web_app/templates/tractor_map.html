@@ -346,6 +346,33 @@
                 </div>
 
                 <div class="card sidebar-card">
+                    <div class="card-header" onclick="$('#gpAgroBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                        Агрохим анализ <span class="collapse-icon collapsed">&#9660;</span>
+                    </div>
+                    <div class="card-body" id="gpAgroBody" style="display:none;">
+                        <div id="agroStatus" class="text-muted">Нет точек анализа</div>
+                        <div style="display:flex;gap:4px;margin-top:4px;">
+                            <select class="form-control form-control-sm" id="agroParam" style="flex:1;">
+                                <option value="ph">pH</option>
+                                <option value="om">Гумус, %</option>
+                                <option value="n">N</option>
+                                <option value="p">P</option>
+                                <option value="k">K</option>
+                                <option value="eko">ЕКО</option>
+                                <option value="ca">Ca</option>
+                                <option value="mg">Mg</option>
+                                <option value="al">Al</option>
+                                <option value="fe">Fe</option>
+                                <option value="clay">Глина, %</option>
+                            </select>
+                            <button class="btn btn-sm btn-success" onclick="showAgroPoints()">Показать</button>
+                            <button class="btn btn-sm btn-outline-danger" onclick="hideAgroPoints()">Скрыть</button>
+                        </div>
+                        <div style="font-size:0.8em;color:#888;margin-top:3px;">Раскраска точек по выбранному показателю</div>
+                    </div>
+                </div>
+
+                <div class="card sidebar-card">
                     <div class="card-header">Работы на поле</div>
                     <div class="card-body" id="gpOpsBody">
                         <div id="fieldOpsList"><span class="text-muted">Загрузка...</span></div>
@@ -473,6 +500,6 @@
 <script>
 var baseCoordinates = {{ base_coordinates|tojson }};
 </script>
-<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5055') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5065') }}"></script>
 {% endblock %}
 
