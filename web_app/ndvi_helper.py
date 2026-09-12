@@ -1029,6 +1029,142 @@ def recalc_all_ndvi():
             results[zid] = False
     return results
 
+_NDVI_SEGMENTS_CACHE = None
+
+def _ndvi_color_segments():
+    stops = []
+    for line in NDVI_COLOR_RAMP:
+        parts = line.split()
+        stops.append((float(parts[0]), (int(parts[1]), int(parts[2]), int(parts[3]))))
+    segs = []
+    for i in range(len(stops) - 1):
+        v0, c0 = stops[i]
+        v1, c1 = stops[i + 1]
+        segs.append((v0, c0, v1, c1))
+    return segs
+
+def _ndvi_from_rgb(rgb):
+    global _NDVI_SEGMENTS_CACHE
+    if _NDVI_SEGMENTS_CACHE is None:
+        _NDVI_SEGMENTS_CACHE = _ndvi_color_segments()
+    r, g, b = rgb
+    if r == 180 and g == 180 and b == 180:
+        return None
+    best, best_dist = None, None
+    for v0, c0, v1, c1 in _NDVI_SEGMENTS_CACHE:
+        dx = c1[0] - c0[0]; dy = c1[1] - c0[1]; dz = c1[2] - c0[2]
+        denom = dx*dx + dy*dy + dz*dz
+        if denom == 0:
+            continue
+        t = ((r - c0[0])*dx + (g - c0[1])*dy + (b - c0[2])*dz) / denom
+        t = max(0.0, min(1.0, t))
+        dist = (c0[0] + t*dx - r)**2 + (c0[1] + t*dy - g)**2 + (c0[2] + t*dz - b)**2
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best = v0 + t*(v1 - v0)
+    return best
+
+def sample_ndvi_for_points(zone_id, scene_date, points):
+    """Sample NDVI (recovered from the stored color overlay) at each lat/lon point."""
+    import sqlite3
+    from osgeo import gdal
+    tmp = None
+    empty = [{'lat': p.get('lat'), 'lon': p.get('lon'), 'ndvi': None} for p in points]
+    try:
+        conn = sqlite3.connect(GPKG_PATH)
+        row = conn.execute('SELECT raster_data, file_path FROM ndvi_scenes_v2 WHERE zone_id=? AND scene_date=?', (zone_id, scene_date)).fetchone()
+        conn.close()
+        if not row:
+            return empty
+        raster_data, tif_path = row
+        if raster_data:
+            tmp = tempfile.NamedTemporaryFile(suffix='.tif', delete=False)
+            tmp.write(raster_data)
+            tmp.close()
+            tif_path = tmp.name
+        elif not tif_path or not os.path.exists(tif_path):
+            return empty
+
+        ds = gdal.Open(tif_path)
+        if ds is None or ds.RasterCount < 4:
+            return empty
+        gt = ds.GetGeoTransform()
+        wkt = ds.GetProjection() or ''
+        xs, ys = ds.RasterXSize, ds.RasterYSize
+        bands = [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(ds.RasterCount)]
+        matches = re.findall(r'(?:AUTHORITY|ID)\["EPSG",?"?(\d+)"?\]', wkt)
+        epsg = matches[-1] if matches else None
+        if not epsg or epsg == '4326':
+            return empty
+
+        def _to_utm(lon, lat):
+            r = subprocess.run(['gdaltransform', '-s_srs', 'EPSG:4326', '-t_srs', f'EPSG:{epsg}'],
+                input=f'{lon} {lat}', capture_output=True, text=True, timeout=10, env=GDAL_ENV)
+            if r.returncode != 0:
+                return None
+            parts = r.stdout.strip().split()
+            if len(parts) < 2:
+                return None
+            return float(parts[0]), float(parts[1])
+
+        results = []
+        for p in points:
+            lon, lat = p.get('lon'), p.get('lat')
+            ndvi = None
+            if lon is not None and lat is not None:
+                try:
+                    xy = _to_utm(lon, lat)
+                    if xy:
+                        px = int(round((xy[0] - gt[0]) / gt[1]))
+                        py = int(round((xy[1] - gt[3]) / gt[5]))
+                        vals = []
+                        for dy in (-1, 0, 1):
+                            for dx in (-1, 0, 1):
+                                iy, ix = py + dy, px + dx
+                                if ix < 0 or iy < 0 or ix >= xs or iy >= ys:
+                                    continue
+                                if bands[3][iy, ix] <= 0:
+                                    continue
+                                v = _ndvi_from_rgb((int(bands[0][iy, ix]), int(bands[1][iy, ix]), int(bands[2][iy, ix])))
+                                if v is not None:
+                                    vals.append(v)
+                        if vals:
+                            ndvi = round(sum(vals) / len(vals), 4)
+                except Exception:
+                    ndvi = None
+            results.append({'lat': lat, 'lon': lon, 'ndvi': ndvi})
+        ds = None
+        return results
+    except Exception as e:
+        print(f'sample_ndvi_for_points error: {e}')
+        return empty
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp.name)
+            except Exception:
+                pass
+
+def build_agro_ndvi_corr(zone_id, scene_date=None, samples=None):
+    """Attach NDVI values to agro samples for a given scene date."""
+    import sqlite3
+    samples = samples or []
+    conn = sqlite3.connect(GPKG_PATH)
+    dates = [r[0] for r in conn.execute('SELECT DISTINCT scene_date FROM ndvi_scenes_v2 WHERE zone_id=? ORDER BY scene_date ASC', (zone_id,)).fetchall()]
+    if scene_date not in dates:
+        scene_date = dates[-1] if dates else None
+    conn.close()
+    out = []
+    if scene_date and samples:
+        pts = [{'lat': s.get('lat'), 'lon': s.get('lon')} for s in samples]
+        for s, nd in zip(samples, sample_ndvi_for_points(zone_id, scene_date, pts)):
+            d = dict(s)
+            d['ndvi'] = nd['ndvi']
+            out.append(d)
+    else:
+        out = [dict(s) for s in samples]
+    return {'zone_id': zone_id, 'scene_date': scene_date, 'available_dates': dates, 'samples': out}
+
 def get_ndvi_geotiff(zone_id, scene_date=None):
     """Return (tif_bytes, filename) for the NDVI GeoTIFF of a zone."""
     import sqlite3, tempfile

@@ -601,6 +601,7 @@ function editGeozone(id) {
     loadYieldSummary(id);
     loadFieldOps(id);
     loadAgroSamples(id);
+    loadAgroNdviDates(id);
 }
 
 function openGeozonePanel(id) {
@@ -677,6 +678,9 @@ function ensureMiniMap() {
     if (!el) return;
     _gpMiniMap = L.map(el, {zoomControl: false, attributionControl: false, scrollWheelZoom: false, doubleClickZoom: false, dragging: false});
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution: ''}).addTo(_gpMiniMap);
+    _gpMiniMap.on('dblclick', function() {
+        if (_gpAgroLayer) showAgroOnMainMap();
+    });
 }
 
 function drawMiniMap(zone) {
@@ -685,6 +689,11 @@ function drawMiniMap(zone) {
     _gpMiniMap.invalidateSize();
     if (_gpMiniPolygon) { _gpMiniMap.removeLayer(_gpMiniPolygon); _gpMiniPolygon = null; }
     if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; }
+    if (_gpAgroLayer) {
+        _gpMiniMap.removeLayer(_gpAgroLayer);
+        _gpAgroLayer = null;
+    }
+    hideAgroPoints();
     var pts = zone.points;
     if (!pts || !pts.length) return;
     _gpMiniPolygon = L.polygon(pts, {color: zone.color || '#3388ff', weight: 2, fillColor: zone.color || '#3388ff', fillOpacity: 0.15}).addTo(_gpMiniMap);
@@ -2275,6 +2284,10 @@ function resetTrackColorL(key) {
 
 var _agroSamplesCache = {};
 var _agroPointsLayer = null;
+var _gpAgroLayer = null;
+var _gpAgroParam = null;
+var _agroMainLayer = null;
+var _agroMainLegend = null;
 
 var _agroParamLabels = {
     ph: 'pH', om: 'Гумус, %', n: 'N', p: 'P', k: 'K',
@@ -2315,9 +2328,14 @@ function showAgroPoints() {
     if (!zoneId) return;
     var samples = _agroSamplesCache[zoneId];
     if (!samples || !samples.length) { alert('Нет точек анализа для этого поля'); return; }
+    ensureMiniMap();
+    if (!_gpMiniMap) return;
     var sel = document.getElementById('agroParam');
     var param = sel ? sel.value : 'ph';
-    hideAgroPoints();
+    if (_gpAgroLayer) {
+        _gpMiniMap.removeLayer(_gpAgroLayer);
+        _gpAgroLayer = null;
+    }
     var group = L.layerGroup();
     var vals = [];
     samples.forEach(function(s) {
@@ -2335,49 +2353,296 @@ function showAgroPoints() {
         mk.bindTooltip((s.name || '') + '<br>' + (_agroParamLabels[param] || param) + ': <b>' + (v === null ? 'н/д' : (v.toString().replace('.', ',')) + ' ' + unit) + '</b>');
         group.addLayer(mk);
     });
-    group.addTo(map);
-    _agroPointsLayer = group;
-    showAgroColorLegend(param, min, max);
+    group.addTo(_gpMiniMap);
+    _gpAgroLayer = group;
+    _gpAgroParam = param;
+    var pts = samples.map(function(s) { return [s.lat, s.lon]; });
+    var bounds = L.latLngBounds(pts).pad(0.1);
+    if (_gpMiniPolygon) bounds.extend(_gpMiniPolygon.getBounds());
+    _gpMiniMap.fitBounds(bounds);
+    if (_gpMiniMap.getZoom() > 18) _gpMiniMap.setZoom(18);
+    showAgroMiniLegend(param, min, max);
 }
 
 function hideAgroPoints() {
-    if (_agroPointsLayer) {
-        map.removeLayer(_agroPointsLayer);
-        _agroPointsLayer = null;
+    if (_gpAgroLayer) {
+        if (_gpMiniMap) _gpMiniMap.removeLayer(_gpAgroLayer);
+        _gpAgroLayer = null;
     }
-    if (_trackMapLegend && !Object.keys(trackColorLayers).length) {
-        _trackMapLegend.remove();
-        _trackMapLegend = null;
-    }
+    var maxEl = document.getElementById('agroMax');
+    var minEl = document.getElementById('agroMin');
+    if (maxEl) maxEl.textContent = '—';
+    if (minEl) minEl.textContent = '—';
 }
 
-function showAgroColorLegend(param, min, max) {
-    if (_trackMapLegend) {
-        _trackMapLegend.remove();
-        _trackMapLegend = null;
-    }
+function updateAgroLegendLabel() {
+    var sel = document.getElementById('agroParam');
+    if (!sel) return;
+    var param = sel.value;
+    var lab = document.getElementById('agroLegendLabel');
+    if (lab) lab.textContent = _agroParamLabels[param] || param;
+}
+
+function showAgroMiniLegend(param, min, max) {
     var label = _agroParamLabels[param] || param;
     var unit = _agroParamUnits[param] || '';
-    var legend = L.control({position: 'bottomright'});
-    legend.onAdd = function() {
+    var maxEl = document.getElementById('agroMax');
+    var minEl = document.getElementById('agroMin');
+    var lab = document.getElementById('agroLegendLabel');
+    if (lab) lab.textContent = label;
+    if (maxEl) maxEl.textContent = Number(max).toFixed(max >= 100 ? 0 : 1) + ' ' + unit;
+    if (minEl) minEl.textContent = Number(min).toFixed(max >= 100 ? 0 : 1) + ' ' + unit;
+}
+
+function showAgroOnMainMap() {
+    var zoneId = currentZoneId;
+    if (!zoneId) return;
+    var samples = _agroSamplesCache[zoneId];
+    var param = _gpAgroParam || 'ph';
+    if (_agroMainLayer) {
+        map.removeLayer(_agroMainLayer);
+        _agroMainLayer = null;
+    }
+    var lastId = currentZoneId;
+    closeGeozonePanel();
+    currentZoneId = lastId;
+    if (!samples || !samples.length) return;
+    var group = L.layerGroup();
+    var vals = [];
+    samples.forEach(function(s) {
+        var v = _agroParamValue(s, param);
+        if (v !== null) vals.push(v);
+    });
+    var min = vals.length ? Math.min.apply(null, vals) : 0;
+    var max = vals.length ? Math.max.apply(null, vals) : 1;
+    samples.forEach(function(s) {
+        var v = _agroParamValue(s, param);
+        var t = (v === null) ? null : _trackColorRange(v, min, max);
+        var c = (t === null) ? '#95a5a6' : _gradColor(t);
+        var mk = L.circleMarker([s.lat, s.lon], {radius: 6, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.9});
+        var unit = _agroParamUnits[param] || '';
+        mk.bindTooltip((s.name || '') + '<br>' + (_agroParamLabels[param] || param) + ': <b>' + (v === null ? 'н/д' : (v.toString().replace('.', ',')) + ' ' + unit) + '</b>');
+        group.addLayer(mk);
+    });
+    group.addTo(map);
+    _agroMainLayer = group;
+    var pts = samples.map(function(s) { return [s.lat, s.lon]; });
+    var bounds = L.latLngBounds(pts).pad(0.15);
+    if (geozoneLayers[zoneId]) {
+        var poly = geozoneLayers[zoneId].polygon;
+        if (poly && poly.getBounds) bounds.extend(poly.getBounds());
+    }
+    map.fitBounds(bounds);
+    showAgroMainLegend(param, min, max);
+}
+
+function _agroMainLegendCtrl() {
+    var ctrl = L.control({position: 'bottomright'});
+    ctrl.onAdd = function() {
         var div = L.DomUtil.create('div');
+        div.id = 'agroMainLegend';
         div.style.background = '#fff';
         div.style.padding = '6px 10px';
         div.style.borderRadius = '4px';
         div.style.boxShadow = '0 1px 5px rgba(0,0,0,0.4)';
         div.style.fontSize = '12px';
         div.style.lineHeight = '1.5';
+        return div;
+    };
+    return ctrl;
+}
+
+function showAgroMainLegend(param, min, max) {
+    if (_agroMainLegend) {
+        _agroMainLegend.remove();
+        _agroMainLegend = null;
+    }
+    var label = _agroParamLabels[param] || param;
+    var unit = _agroParamUnits[param] || '';
+    var ctrl = _agroMainLegendCtrl();
+    ctrl.addTo(map);
+    var div = document.getElementById('agroMainLegend');
+    if (div) {
         div.innerHTML = '<b>' + label + '</b><br>' +
             '<div style="display:flex;align-items:center;">' +
             '<div style="height:70px;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-end;margin-right:5px;">' +
-            '<span>' + (Number(max).toFixed(max >= 100 ? 0 : 1)) + ' ' + unit + '</span>' +
-            '<span>' + (Number(min).toFixed(max >= 100 ? 0 : 1)) + ' ' + unit + '</span></div>' +
-            '<div style="width:18px;height:70px;display:inline-block;vertical-align:middle;border:1px solid #ccc;background:linear-gradient(to top,' +
-            _gradColor(0) + ',' + _gradColor(0.25) + ',' + _gradColor(0.5) + ',' + _gradColor(0.75) + ',' + _gradColor(1) + ');border-radius:2px;"></div></div>';
-        return div;
-    };
-    legend.addTo(map);
-    _trackMapLegend = legend;
+            '<span>' + Number(max).toFixed(max >= 100 ? 0 : 1) + ' ' + unit + '</span>' +
+            '<span>' + Number(min).toFixed(max >= 100 ? 0 : 1) + ' ' + unit + '</span></div>' +
+            '<div style="width:18px;height:70px;border:1px solid #ccc;border-radius:2px;background:linear-gradient(to top,' +
+            _gradColor(0) + ',' + _gradColor(0.25) + ',' + _gradColor(0.5) + ',' + _gradColor(0.75) + ',' + _gradColor(1) + ');"></div></div>' +
+            '<div style="margin-top:4px;"><button class="btn btn-xs btn-outline-danger" onclick="hideAgroMainPoints()" style="font-size:0.75em;padding:0 6px;">Скрыть точки</button></div>';
+    }
+    _agroMainLegend = ctrl;
+}
+
+function hideAgroMainPoints() {
+    if (_agroMainLayer) {
+        map.removeLayer(_agroMainLayer);
+        _agroMainLayer = null;
+    }
+    if (_agroMainLegend) {
+        _agroMainLegend.remove();
+        _agroMainLegend = null;
+    }
+}
+
+var _agroNdviCache = {};
+
+function loadAgroNdviDates(zoneId) {
+    var sel = document.getElementById('agroNdviDate');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">— Дата снимка —</option>';
+    if (_agroNdviCache[zoneId]) {
+        fillAgroNdviDates(sel, _agroNdviCache[zoneId]);
+        return;
+    }
+    fetch('/api/agro_ndvi_corr?zone_id=' + encodeURIComponent(zoneId))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            _agroNdviCache[zoneId] = data || {};
+            if (currentZoneId !== zoneId) return;
+            fillAgroNdviDates(sel, _agroNdviCache[zoneId]);
+        })
+        .catch(function() {});
+}
+
+function fillAgroNdviDates(sel, data) {
+    var dates = (data && data.available_dates) || [];
+    if (!dates.length) {
+        sel.innerHTML = '<option value="">Нет снимков NDVI</option>';
+        return;
+    }
+    var html = '';
+    dates.forEach(function(d) {
+        html += '<option value="' + d + '">' + d + '</option>';
+    });
+    sel.innerHTML = html;
+    if (data.scene_date) sel.value = data.scene_date;
+}
+
+function buildAgroNdviCorr() {
+    var zoneId = currentZoneId;
+    if (!zoneId) return;
+    var dateSel = document.getElementById('agroNdviDate');
+    var paramSel = document.getElementById('agroNdviParam');
+    var date = dateSel ? dateSel.value : '';
+    var param = paramSel ? paramSel.value : 'ph';
+    if (!date) { alert('Нет снимков NDVI для этого поля'); return; }
+    var res = document.getElementById('agroNdviResult');
+    var title = document.getElementById('agroNdviTitle');
+    if (res) res.style.display = 'block';
+    if (title) title.textContent = 'Загрузка...';
+    fetch('/api/agro_ndvi_corr?zone_id=' + encodeURIComponent(zoneId) + '&scene_date=' + encodeURIComponent(date))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (currentZoneId !== zoneId) return;
+            drawAgroNdviScatter(data, param);
+        })
+        .catch(function() {
+            if (title) title.textContent = 'Ошибка загрузки';
+        });
+}
+
+function hideAgroNdviCorr() {
+    var res = document.getElementById('agroNdviResult');
+    if (res) res.style.display = 'none';
+}
+
+function drawAgroNdviScatter(data, param) {
+    var title = document.getElementById('agroNdviTitle');
+    var stats = document.getElementById('agroNdviStats');
+    var canvas = document.getElementById('agroNdviCanvas');
+    var samples = (data && data.samples) || [];
+    var points = [];
+    samples.forEach(function(s) {
+        var x = _agroParamValue(s, param);
+        var y = _agroParamValue(s, 'ndvi');
+        if (x !== null && y !== null) points.push({ x: x, y: y, name: s.name || '' });
+    });
+    if (title) {
+        title.textContent = (_agroParamLabels[param] || param) + ' → NDVI, снимок: ' + (data.scene_date || '') +
+            ' | точек: ' + points.length + '/' + samples.length;
+    }
+    if (!points.length || !canvas) {
+        if (stats) stats.textContent = 'Нет данных для точек пробы (за пределами поля)';
+        if (canvas) {
+            var ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        return;
+    }
+    var xs = points.map(function(p) { return p.x; });
+    var ys = points.map(function(p) { return p.y; });
+    var r = pearson(xs, ys);
+    var xMin = Math.min.apply(null, xs), xMax = Math.max.apply(null, xs);
+    var yMin = Math.min.apply(null, ys), yMax = Math.max.apply(null, ys);
+    if (xMin === xMax) { xMin -= 1; xMax += 1; }
+    if (yMin === yMax) { yMin -= 0.05; yMax += 0.05; }
+    var padL = 34, padR = 8, padT = 8, padB = 22;
+    var w = canvas.width, h = canvas.height;
+    var ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    function sx(v) { return padL + (v - xMin) / (xMax - xMin) * (w - padL - padR); }
+    function sy(v) { return h - padB - (v - yMin) / (yMax - yMin) * (h - padT - padB); }
+    ctx.strokeStyle = '#999';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(padL, padT, w - padL - padR, h - padT - padB);
+    ctx.fillStyle = '#666';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(Number(yMax).toFixed(2), padL - 5, sy(yMax) + 3);
+    ctx.fillText(Number(yMin).toFixed(2), padL - 5, sy(yMin) + 3);
+    ctx.textAlign = 'left';
+    ctx.fillText('NDVI', padL + 3, padT + 9);
+    ctx.textAlign = 'center';
+    ctx.fillText(Number(xMin).toFixed(1), sx(xMin), h - padB + 13);
+    ctx.fillText(Number(xMax).toFixed(1), sx(xMax), h - padB + 13);
+    if (!isNaN(r)) {
+        var n = points.length;
+        var a = (n * sum(xs, ys) - sum(xs, 1) * sum(ys, 1)) / (n * sum(xs, xs) - sum(xs, 1) * sum(xs, 1));
+        var b = (sum(ys, 1) - a * sum(xs, 1)) / n;
+        ctx.strokeStyle = '#2c3e50';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(sx(xMin), sy(a * xMin + b));
+        ctx.lineTo(sx(xMax), sy(a * xMax + b));
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+    points.forEach(function(p) {
+        ctx.fillStyle = '#e74c3c';
+        ctx.beginPath();
+        ctx.arc(sx(p.x), sy(p.y), 3, 0, Math.PI * 2);
+        ctx.fill();
+    });
+    if (stats) {
+        var rText = isNaN(r) ? '—' : r.toFixed(3);
+        var cls = (!isNaN(r) ? (r > 0.5 ? '#27ae60' : (r < -0.5 ? '#c0392b' : '#7f8c8d')) : '#7f8c8d');
+        stats.innerHTML = 'Коэффициент корреляции Пирсона: <b style="color:' + cls + ';">r = ' + rText + '</b>';
+    }
+}
+
+function sum(arr, brr) {
+    var s = 0;
+    for (var i = 0; i < arr.length; i++) s += arr[i] * (typeof brr === 'number' ? brr : brr[i]);
+    return s;
+}
+
+function pearson(a, b) {
+    if (!a.length || a.length !== b.length) return NaN;
+    var n = a.length;
+    var mx = sum(a, 1) / n, my = sum(b, 1) / n;
+    var num = 0, dx = 0, dy = 0;
+    for (var i = 0; i < n; i++) {
+        num += (a[i] - mx) * (b[i] - my);
+        dx += (a[i] - mx) * (a[i] - mx);
+        dy += (b[i] - my) * (b[i] - my);
+    }
+    if (dx === 0 || dy === 0) return NaN;
+    return num / Math.sqrt(dx * dy);
 }
 
 function createTractorMarker(username) {
