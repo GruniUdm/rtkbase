@@ -313,7 +313,7 @@
                 </div>
 
                 <div class="card sidebar-card">
-                    <div class="card-header" onclick="$('#gpNdviBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    <div class="card-header" onclick="toggleGpNdvi(this);">
                         NDVI <span class="collapse-icon collapsed">&#9660;</span>
                     </div>
                     <div class="card-body" id="gpNdviBody" style="display:none;">
@@ -347,9 +347,9 @@
 
                 <div class="card sidebar-card">
                     <div class="card-header" onclick="$('#gpAgroBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
-                        Агрохим анализ <span class="collapse-icon">&#9660;</span>
+                        Агрохим анализ <span class="collapse-icon collapsed">&#9660;</span>
                     </div>
-                    <div class="card-body" id="gpAgroBody">
+                    <div class="card-body" id="gpAgroBody" style="display:none;">
                         <div id="agroStatus" class="text-muted">Нет точек анализа</div>
                         <div style="display:flex;gap:10px;align-items:flex-start;margin-top:6px;">
                             <div id="agroLegend" style="font-size:0.8em;flex:0 0 auto;">
@@ -515,6 +515,6 @@
 <script>
 var baseCoordinates = {{ base_coordinates|tojson }};
 </script>
-<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5077') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5082') }}"></script>
 {% endblock %}
 

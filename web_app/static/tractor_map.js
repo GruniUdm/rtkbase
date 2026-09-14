@@ -627,6 +627,10 @@ function openGeozonePanel(id) {
     if (p) p.style.display = 'block';
     if (p) p.scrollTop = 0;
     setTimeout(function() { drawMiniMap(z); }, 80);
+    setTimeout(function() {
+        var body = document.getElementById('gpNdviBody');
+        if (body && body.style.display !== 'none' && currentZoneId) showMiniMapNdviOverlay(currentZoneId);
+    }, 300);
 }
 
 function closeGeozonePanel() {
@@ -636,6 +640,7 @@ function closeGeozonePanel() {
     _pendingAlertIp = null;
     _pendingAlertTrack = null;
     if (lastId) hideNdviOverlay(lastId);
+    hideMiniMapNdviOverlay();
     hideAgroPoints();
     var p = document.getElementById('geozonePanel');
     if (p) p.style.display = 'none';
@@ -686,6 +691,7 @@ function drawMiniMap(zone) {
     ensureMiniMap();
     if (!_gpMiniMap || !zone) return;
     _gpMiniMap.invalidateSize();
+    hideMiniMapNdviOverlay();
     if (_gpMiniPolygon) { _gpMiniMap.removeLayer(_gpMiniPolygon); _gpMiniPolygon = null; }
     if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; }
     if (_gpAgroLayer) {
@@ -705,6 +711,57 @@ function drawMiniMapTrack(latlngs, color) {
     if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; }
     if (!latlngs || latlngs.length < 2) return;
     _gpMiniTrack = L.polyline(latlngs, {color: color || '#3498db', weight: 3, opacity: 0.9}).addTo(_gpMiniMap);
+}
+
+// -------- NDVI оверлей на мини-карте --------
+
+var _gpMiniNdviOverlay = null;
+
+function toggleGpNdvi(hdr) {
+    var body = document.getElementById('gpNdviBody');
+    var hidden = !body || body.style.display === 'none';
+    if (body) body.style.display = hidden ? '' : 'none';
+    if (hdr) {
+        var ic = hdr.querySelector('.collapse-icon');
+        if (ic) ic.classList.toggle('collapsed');
+    }
+    if (!hidden) {
+        hideMiniMapNdviOverlay();
+        return;
+    }
+    if (currentZoneId) showMiniMapNdviOverlay(currentZoneId);
+}
+
+function showMiniMapNdviOverlay(zoneId, sceneDate) {
+    ensureMiniMap();
+    if (!_gpMiniMap) return;
+    hideMiniMapNdviOverlay();
+    var dateParam = sceneDate ? "?date=" + sceneDate : "";
+    var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
+    var overlayUrl = apiPrefix + "/overlay/" + zoneId + ".png" + dateParam;
+    fetch(overlayUrl)
+        .then(function(r) {
+            if (!r.ok) throw new Error("NDVI overlay not found");
+            var bbox = JSON.parse(r.headers.get("X-Bbox") || "[]");
+            return r.blob().then(function(blob) { return {bbox: bbox, blob: blob}; });
+        })
+        .then(function(data) {
+            if (!data || data.bbox.length !== 4) throw new Error("Invalid bbox");
+            var bounds = [[data.bbox[1], data.bbox[0]], [data.bbox[3], data.bbox[2]]];
+            var imageUrl = URL.createObjectURL(data.blob);
+            _gpMiniNdviOverlay = L.imageOverlay(imageUrl, bounds, {opacity: 0.7}).addTo(_gpMiniMap);
+            $("#ndviLegend").show();
+        })
+        .catch(function(e) {
+            console.log("Mini map NDVI overlay failed:", e.message);
+        });
+}
+
+function hideMiniMapNdviOverlay() {
+    if (_gpMiniNdviOverlay && _gpMiniMap) {
+        _gpMiniMap.removeLayer(_gpMiniNdviOverlay);
+        _gpMiniNdviOverlay = null;
+    }
 }
 
 // -------- Детекция движения тракторов (список для оператора) --------
