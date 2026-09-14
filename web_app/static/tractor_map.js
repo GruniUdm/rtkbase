@@ -2490,7 +2490,7 @@ function showMiniMapOnMainMap() {
         showNdviOverlay(zoneId, miniNdviDate);
     }
 
-    if (miniHasAgro && samples && samples.length) {
+    if ((miniHasAgro || miniTrackLatlngs) && samples && samples.length) {
         var group = L.layerGroup();
         var vals = [];
         samples.forEach(function(s) {
