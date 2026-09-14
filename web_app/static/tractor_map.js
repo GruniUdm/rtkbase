@@ -2349,6 +2349,7 @@ var _gpAgroParam = null;
 var _agroMainLayer = null;
 var _agroMainLegend = null;
 var _gpMainTrack = null;
+var _lastAgroParam = null;
 
 var _agroParamLabels = {
     ph: 'pH', om: 'Гумус, %', n: 'N', p: 'P', k: 'K',
@@ -2372,6 +2373,17 @@ function loadAgroSamples(zoneId) {
         .then(function(samples) {
             _agroSamplesCache[zoneId] = samples || [];
             if (currentZoneId !== zoneId) return;
+            var body = document.getElementById('gpAgroBody');
+            if (body && body.style.display !== 'none') {
+                if (_lastAgroParam) {
+                    var sel = document.getElementById('agroParam');
+                    if (sel && sel.querySelector('option[value="' + _lastAgroParam + '"]')) sel.value = _lastAgroParam;
+                }
+                if (samples && samples.length) {
+                    showAgroPoints();
+                    return;
+                }
+            }
             if (!samples || !samples.length) {
                 el.textContent = 'Нет точек анализа для этого поля';
             } else {
@@ -2384,6 +2396,30 @@ function loadAgroSamples(zoneId) {
         });
 }
 
+function toggleGpAgro(hdr) {
+    var body = document.getElementById('gpAgroBody');
+    var hidden = !body || body.style.display === 'none';
+    if (body) body.style.display = hidden ? '' : 'none';
+    if (hdr) {
+        var ic = hdr.querySelector('.collapse-icon');
+        if (ic) ic.classList.toggle('collapsed');
+    }
+    if (hidden) {
+        var zoneId = currentZoneId;
+        var samples = zoneId ? (_agroSamplesCache[zoneId] || null) : null;
+        if (samples && samples.length) {
+            if (_lastAgroParam) {
+                var sel = document.getElementById('agroParam');
+                if (sel && sel.querySelector('option[value="' + _lastAgroParam + '"]')) sel.value = _lastAgroParam;
+            }
+            showAgroPoints();
+        }
+    } else {
+        hideAgroPoints();
+        hideAgroMainPoints();
+    }
+}
+
 function showAgroPoints() {
     var zoneId = currentZoneId;
     if (!zoneId) return;
@@ -2393,6 +2429,7 @@ function showAgroPoints() {
     if (!_gpMiniMap) return;
     var sel = document.getElementById('agroParam');
     var param = sel ? sel.value : 'ph';
+    _lastAgroParam = param;
     if (_gpAgroLayer) {
         _gpMiniMap.removeLayer(_gpAgroLayer);
         _gpAgroLayer = null;

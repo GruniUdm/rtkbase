@@ -346,7 +346,7 @@
                 </div>
 
                 <div class="card sidebar-card">
-                    <div class="card-header" onclick="$('#gpAgroBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    <div class="card-header" onclick="toggleGpAgro(this);">
                         Агрохим анализ <span class="collapse-icon collapsed">&#9660;</span>
                     </div>
                     <div class="card-body" id="gpAgroBody" style="display:none;">
@@ -515,6 +515,6 @@
 <script>
 var baseCoordinates = {{ base_coordinates|tojson }};
 </script>
-<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5087') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5088') }}"></script>
 {% endblock %}
 
