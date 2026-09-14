@@ -2175,6 +2175,16 @@ function attachTrackColor(layer, key, kind) {
     });
 }
 
+function _attachTrackPointDbl(mk, key) {
+    mk._colorKey = key;
+    mk._colorKind = 'track';
+    mk.on('dblclick', function(e) {
+        L.DomEvent.stopPropagation(e);
+        L.DomEvent.preventDefault(e);
+        openTrackColorPopup(mk, e.latlng);
+    });
+}
+
 function openTrackColorPopup(layer, latlng) {
     var key = layer._colorKey;
     var html = '<div style="min-width:220px;">' +
@@ -2195,7 +2205,10 @@ function openTrackColorPopup(layer, latlng) {
     layer.openPopup(latlng);
     layer.once('popupclose', function() {
         var pts = layer._points;
-        if (!pts) return;
+        if (!pts) {
+            if (layer._pointTooltip) layer.bindTooltip(layer._pointTooltip, {sticky: true});
+            return;
+        }
         var d = calcTrackDistance(pts.map(function(p) { return [p.lat, p.lon]; }));
         if (d > 0) layer.bindTooltip(trackTooltip(d), {sticky: true});
     });
@@ -2251,7 +2264,10 @@ function applyTrackColor(key) {
             var q = _pointParamValue(p, 'q');
             var c = _fixQualColors[q] || '#95a5a6';
             var mk = L.circleMarker([p.lat, p.lon], {radius: 4, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.9});
-            mk.bindTooltip((_fixQualLabels[q] !== undefined ? 'Fix: ' + _fixQualLabels[q] : 'Fix: ' + q));
+            var tip = (_fixQualLabels[q] !== undefined ? 'Fix: ' + _fixQualLabels[q] : 'Fix: ' + q);
+            mk.bindTooltip(tip);
+            mk._pointTooltip = tip;
+            _attachTrackPointDbl(mk, key);
             group.addLayer(mk);
         });
         showTrackColorLegend('q');
@@ -2264,7 +2280,10 @@ function applyTrackColor(key) {
             var c = _gradColor(t);
             var mk = L.circleMarker([p.lat, p.lon], {radius: 4, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.85});
             var v = _pointParamValue(p, param);
-            mk.bindTooltip(param === 'alt' ? (v.toFixed(1) + ' м') : (param === 's' ? Math.round(v) + ' спутн' : v.toFixed(1)));
+            var tip = param === 'alt' ? (v.toFixed(1) + ' м') : (param === 's' ? Math.round(v) + ' спутн' : v.toFixed(1));
+            mk.bindTooltip(tip);
+            mk._pointTooltip = tip;
+            _attachTrackPointDbl(mk, key);
             group.addLayer(mk);
         });
         showTrackColorLegend(param, min, max);
@@ -2532,33 +2551,7 @@ function showMiniMapOnMainMap() {
     }
 
     if (miniHasAgro && samples && samples.length) {
-        var group = L.layerGroup();
-        var vals = [];
-        samples.forEach(function(s) {
-            var v = _agroParamValue(s, param);
-            if (v !== null) vals.push(v);
-        });
-        var min = vals.length ? Math.min.apply(null, vals) : 0;
-        var max = vals.length ? Math.max.apply(null, vals) : 1;
-        samples.forEach(function(s) {
-            var v = _agroParamValue(s, param);
-            var t = (v === null) ? null : _trackColorRange(v, min, max);
-            var c = (t === null) ? '#95a5a6' : _gradColor(t);
-            var mk = L.circleMarker([s.lat, s.lon], {radius: 6, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.9});
-            var unit = _agroParamUnits[param] || '';
-            mk.bindTooltip((s.name || '') + '<br>' + (_agroParamLabels[param] || param) + ': <b>' + (v === null ? 'н/д' : (v.toString().replace('.', ',')) + ' ' + unit) + '</b>');
-            group.addLayer(mk);
-        });
-        group.addTo(map);
-        _agroMainLayer = group;
-        showAgroMainLegend(param, min, max);
-        var pts = samples.map(function(s) { return [s.lat, s.lon]; });
-        var bounds = L.latLngBounds(pts).pad(0.15);
-        if (geozoneLayers[zoneId]) {
-            var poly = geozoneLayers[zoneId].polygon;
-            if (poly && poly.getBounds) bounds.extend(poly.getBounds());
-        }
-        map.fitBounds(bounds);
+        showAgroMainPoints(param, true);
     }
 
     if (miniTrackLatlngs && miniTrackLatlngs.length > 1) {
@@ -2569,17 +2562,6 @@ function showMiniMapOnMainMap() {
             trackRawPoints['mini'] = raw;
             sessionTrackLayers['mini'] = _gpMainTrack;
             applyTrackColor('mini');
-            var grp = trackColorLayers['mini'];
-            if (grp) {
-                grp._points = raw;
-                grp._colorKey = 'mini';
-                grp._colorKind = 'track';
-                grp.on('dblclick', function(e) {
-                    L.DomEvent.stopPropagation(e);
-                    L.DomEvent.preventDefault(e);
-                    openTrackColorPopup(grp, e.latlng);
-                });
-            }
         }
         map.fitBounds(L.latLngBounds(miniTrackLatlngs).pad(0.15));
     }
@@ -2632,6 +2614,117 @@ function hideAgroMainPoints() {
     if (_agroMainLegend) {
         _agroMainLegend.remove();
         _agroMainLegend = null;
+    }
+}
+
+function _agroParamOptionsHtml(selected) {
+    var html = '';
+    var order = ['ph', 'om', 'n', 'p', 'k', 'eko', 'ca', 'mg', 'al', 'fe', 'clay'];
+    for (var i = 0; i < order.length; i++) {
+        var p = order[i];
+        html += '<option value="' + p + '"' + (p === selected ? ' selected' : '') + '>' + (_agroParamLabels[p] || p) + '</option>';
+    }
+    return html;
+}
+
+function openAgroColorPopup(layer, latlng) {
+    var param = (layer && layer._agroParam) || _gpAgroParam || 'ph';
+    var html = '<div style="min-width:220px;">' +
+        '<div style="font-weight:600;font-size:0.95em;margin-bottom:4px;">Цвет точек агрохим</div>' +
+        '<select id="agroMainParam" onchange="updateAgroMainLegendPopup()" style="width:100%;font-size:0.85em;">' +
+        _agroParamOptionsHtml(param) +
+        '</select>' +
+        '<div id="agroMainColorLegend" style="margin:6px 0;font-size:0.75em;color:#666;"></div>' +
+        '<div style="display:flex;gap:4px;margin-top:4px;">' +
+        '<button class="btn btn-xs btn-success" onclick="applyAgroColorParam()" style="font-size:0.75em;padding:0 6px;">Применить</button> ' +
+        '<button class="btn btn-xs btn-outline-danger" onclick="hideAgroMainPoints()" style="font-size:0.75em;padding:0 6px;">Скрыть точки</button>' +
+        '</div></div>';
+    layer.unbindTooltip();
+    layer.bindPopup(html, {className: 'track-color-popup'});
+    layer.openPopup(latlng);
+    layer.once('popupclose', function() {
+        if (layer._pointTooltip) layer.bindTooltip(layer._pointTooltip, {sticky: true});
+    });
+    updateAgroMainLegendPopup();
+}
+
+function updateAgroMainLegendPopup() {
+    var zoneId = currentZoneId;
+    if (!zoneId) return;
+    var el = document.getElementById('agroMainColorLegend');
+    if (!el) return;
+    var sel = document.getElementById('agroMainParam');
+    var param = sel ? sel.value : 'ph';
+    var samples = _agroSamplesCache[zoneId] || [];
+    if (!samples.length) { el.innerHTML = 'Нет данных'; return; }
+    var vals = [];
+    samples.forEach(function(s) {
+        var v = _agroParamValue(s, param);
+        if (v !== null) vals.push(v);
+    });
+    if (!vals.length) { el.innerHTML = 'Нет данных'; return; }
+    var min = Math.min.apply(null, vals);
+    var max = Math.max.apply(null, vals);
+    var unit = _agroParamUnits[param] || '';
+    el.innerHTML = '<span style="color:' + _gradColor(0) + ';">&#11044;</span> ' +
+        '<span style="display:inline-block;width:90px;height:8px;margin:0 4px;vertical-align:middle;background:linear-gradient(to right,' +
+        _gradColor(0) + ',' + _gradColor(0.5) + ',' + _gradColor(1) + ');border-radius:2px;"></span>' +
+        '<span style="color:' + _gradColor(1) + ';">&#11044;</span> ' +
+        ' <b>' + Number(min).toFixed(min >= 100 ? 0 : 1) + '</b> \u2026 <b>' + Number(max).toFixed(max >= 100 ? 0 : 1) + '</b> ' + unit;
+}
+
+function applyAgroColorParam() {
+    var sel = document.getElementById('agroMainParam');
+    var param = sel ? sel.value : 'ph';
+    showAgroMainPoints(param, true);
+    if (map) map.closePopup();
+}
+
+function showAgroMainPoints(param, fit) {
+    var zoneId = currentZoneId;
+    if (!zoneId) return;
+    var samples = _agroSamplesCache[zoneId];
+    if (!samples || !samples.length) return;
+    if (_agroMainLayer) {
+        map.removeLayer(_agroMainLayer);
+        _agroMainLayer = null;
+    }
+    var group = L.layerGroup();
+    var vals = [];
+    samples.forEach(function(s) {
+        var v = _agroParamValue(s, param);
+        if (v !== null) vals.push(v);
+    });
+    var min = vals.length ? Math.min.apply(null, vals) : 0;
+    var max = vals.length ? Math.max.apply(null, vals) : 1;
+    samples.forEach(function(s) {
+        var v = _agroParamValue(s, param);
+        var t = (v === null) ? null : _trackColorRange(v, min, max);
+        var c = (t === null) ? '#95a5a6' : _gradColor(t);
+        var mk = L.circleMarker([s.lat, s.lon], {radius: 6, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.9});
+        mk._agroParam = param;
+        mk.on('dblclick', function(e) {
+            L.DomEvent.stopPropagation(e);
+            L.DomEvent.preventDefault(e);
+            openAgroColorPopup(mk, e.latlng);
+        });
+        var unit = _agroParamUnits[param] || '';
+        var tt = (s.name || '') + '<br>' + (_agroParamLabels[param] || param) + ': <b>' + (v === null ? 'н/д' : (v.toString().replace('.', ',')) + ' ' + unit) + '</b>';
+        mk.bindTooltip(tt);
+        mk._pointTooltip = tt;
+        group.addLayer(mk);
+    });
+    group.addTo(map);
+    _agroMainLayer = group;
+    showAgroMainLegend(param, min, max);
+    if (fit) {
+        var pts = samples.map(function(s) { return [s.lat, s.lon]; });
+        var bounds = L.latLngBounds(pts).pad(0.15);
+        if (geozoneLayers[zoneId]) {
+            var poly = geozoneLayers[zoneId].polygon;
+            if (poly && poly.getBounds) bounds.extend(poly.getBounds());
+        }
+        map.fitBounds(bounds);
     }
 }
 
