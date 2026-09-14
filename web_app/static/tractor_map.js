@@ -675,6 +675,7 @@ function gpDelete() {
 var _gpMiniMap = null;
 var _gpMiniPolygon = null;
 var _gpMiniTrack = null;
+var _gpMiniTrackRaw = null;
 
 function ensureMiniMap() {
     if (_gpMiniMap) return;
@@ -693,7 +694,7 @@ function drawMiniMap(zone) {
     _gpMiniMap.invalidateSize();
     hideMiniMapNdviOverlay();
     if (_gpMiniPolygon) { _gpMiniMap.removeLayer(_gpMiniPolygon); _gpMiniPolygon = null; }
-    if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; }
+    if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; _gpMiniTrackRaw = null; }
     if (_gpAgroLayer) {
         _gpMiniMap.removeLayer(_gpAgroLayer);
         _gpAgroLayer = null;
@@ -705,9 +706,10 @@ function drawMiniMap(zone) {
     _gpMiniMap.fitBounds(L.latLngBounds(pts).pad(0.1));
 }
 
-function drawMiniMapTrack(latlngs, color) {
+function drawMiniMapTrack(latlngs, color, rawPoints) {
     ensureMiniMap();
     if (!_gpMiniMap) return;
+    _gpMiniTrackRaw = rawPoints || null;
     if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; }
     if (!latlngs || latlngs.length < 2) return;
     _gpMiniTrack = L.polyline(latlngs, {color: color || '#3498db', weight: 3, opacity: 0.9}).addTo(_gpMiniMap);
@@ -895,8 +897,8 @@ function loadAlertTrackForOp(ip, fromTs, toTs) {
                 _pendingAlertTrack = null;
                 return;
             }
-            _pendingAlertTrack = _simplifyTrack(points.map(function(p) { return {t: p.t, lat: p.lat, lon: p.lon}; }));
-            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }));
+            _pendingAlertTrack = _simplifyTrack(points);
+            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }), null, _pendingAlertTrack);
         })
         .catch(function() { _pendingAlertTrack = null; });
 }
@@ -1006,7 +1008,7 @@ try {
                 return;
             }
             var simplified = _simplifyTrack(track);
-            drawMiniMapTrack(simplified.map(function(p) { return [p.lat, p.lon]; }));
+            drawMiniMapTrack(simplified.map(function(p) { return [p.lat, p.lon]; }), null, simplified);
             _gpMiniMap.fitBounds(L.latLngBounds(simplified.map(function(p) { return [p.lat, p.lon]; })).pad(0.1));
         } catch (e) {
         alert('Не удалось разобрать трек: ' + e.message);
@@ -1146,7 +1148,7 @@ function saveFieldOp() {
         toggleAddOpForm();
         loadFieldOps(zoneId);
         if (_pendingAlertTrack) {
-            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }));
+            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }), null, _pendingAlertTrack);
         }
         if (_pendingAlertId) {
             var pid = _pendingAlertId;
@@ -1467,7 +1469,7 @@ function openVisitWork(idx) {
         var ops = document.getElementById('gpOpsBody');
         if (ops) ops.scrollIntoView({behavior: 'smooth', block: 'start'});
         if (_pendingAlertTrack) {
-            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }));
+            drawMiniMapTrack(_pendingAlertTrack.map(function(p) { return [p.lat, p.lon]; }), null, _pendingAlertTrack);
         }
     }, 120);
 }
@@ -2464,7 +2466,9 @@ function showMiniMapOnMainMap() {
     var miniNdviDate = _gpMiniNdviDate;
     var miniHasAgro = !!_gpAgroLayer;
     var miniTrackLatlngs = null;
+    var miniTrackRaw = null;
     if (_gpMiniTrack) {
+        if (_gpMiniTrackRaw) miniTrackRaw = _gpMiniTrackRaw;
         var ll = _gpMiniTrack.getLatLngs();
         if (ll && ll.length) {
             miniTrackLatlngs = [];
@@ -2490,7 +2494,7 @@ function showMiniMapOnMainMap() {
         showNdviOverlay(zoneId, miniNdviDate);
     }
 
-    if ((miniHasAgro || miniTrackLatlngs) && samples && samples.length) {
+    if (miniHasAgro && samples && samples.length) {
         var group = L.layerGroup();
         var vals = [];
         samples.forEach(function(s) {
@@ -2521,7 +2525,25 @@ function showMiniMapOnMainMap() {
     }
 
     if (miniTrackLatlngs && miniTrackLatlngs.length > 1) {
+        var raw = miniTrackRaw || null;
         _gpMainTrack = L.polyline(miniTrackLatlngs, {color: '#3498db', weight: 3, opacity: 0.9}).addTo(map);
+        if (raw && raw.length > 1) {
+            _gpMainTrack._points = raw;
+            trackRawPoints['mini'] = raw;
+            sessionTrackLayers['mini'] = _gpMainTrack;
+            applyTrackColor('mini');
+            var grp = trackColorLayers['mini'];
+            if (grp) {
+                grp._points = raw;
+                grp._colorKey = 'mini';
+                grp._colorKind = 'track';
+                grp.on('dblclick', function(e) {
+                    L.DomEvent.stopPropagation(e);
+                    L.DomEvent.preventDefault(e);
+                    openTrackColorPopup(grp, e.latlng);
+                });
+            }
+        }
         map.fitBounds(L.latLngBounds(miniTrackLatlngs).pad(0.15));
     }
 }
