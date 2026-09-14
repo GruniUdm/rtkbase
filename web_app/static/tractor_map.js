@@ -683,7 +683,7 @@ function ensureMiniMap() {
     _gpMiniMap = L.map(el, {zoomControl: false, attributionControl: false, scrollWheelZoom: false, doubleClickZoom: false, dragging: false});
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution: ''}).addTo(_gpMiniMap);
     _gpMiniMap.on('dblclick', function() {
-        showAgroOnMainMap();
+        showMiniMapOnMainMap();
     });
 }
 
@@ -716,6 +716,7 @@ function drawMiniMapTrack(latlngs, color) {
 // -------- NDVI оверлей на мини-карте --------
 
 var _gpMiniNdviOverlay = null;
+var _gpMiniNdviDate = null;
 
 function toggleGpNdvi(hdr) {
     var body = document.getElementById('gpNdviBody');
@@ -736,6 +737,7 @@ function showMiniMapNdviOverlay(zoneId, sceneDate) {
     ensureMiniMap();
     if (!_gpMiniMap) return;
     hideMiniMapNdviOverlay();
+    _gpMiniNdviDate = sceneDate || null;
     var dateParam = sceneDate ? "?date=" + sceneDate : "";
     var apiPrefix = ndviMode === 'contrast' ? "/api/ndvi/contrast" : "/api/ndvi";
     var overlayUrl = apiPrefix + "/overlay/" + zoneId + ".png" + dateParam;
@@ -2344,6 +2346,7 @@ var _gpAgroLayer = null;
 var _gpAgroParam = null;
 var _agroMainLayer = null;
 var _agroMainLegend = null;
+var _gpMainTrack = null;
 
 var _agroParamLabels = {
     ph: 'pH', om: 'Гумус, %', n: 'N', p: 'P', k: 'K',
@@ -2450,46 +2453,77 @@ function showAgroMiniLegend(param, min, max) {
     if (minEl) minEl.textContent = Number(min).toFixed(max >= 100 ? 0 : 1) + ' ' + unit;
 }
 
-function showAgroOnMainMap() {
+function showMiniMapOnMainMap() {
     var zoneId = currentZoneId;
     if (!zoneId) return;
     var samples = _agroSamplesCache[zoneId];
     var param = _gpAgroParam || 'ph';
+
+    // Capture minimap state before closing the panel (close clears those vars)
+    var miniHasNdvi = !!_gpMiniNdviOverlay;
+    var miniNdviDate = _gpMiniNdviDate;
+    var miniHasAgro = !!_gpAgroLayer;
+    var miniTrackLatlngs = null;
+    if (_gpMiniTrack) {
+        var ll = _gpMiniTrack.getLatLngs();
+        if (ll && ll.length) {
+            miniTrackLatlngs = [];
+            for (var i = 0; i < ll.length; i++) {
+                miniTrackLatlngs.push([ll[i].lat, ll[i].lng]);
+            }
+        }
+    }
+
     if (_agroMainLayer) {
         map.removeLayer(_agroMainLayer);
         _agroMainLayer = null;
     }
+    if (_gpMainTrack) {
+        map.removeLayer(_gpMainTrack);
+        _gpMainTrack = null;
+    }
     var lastId = currentZoneId;
     closeGeozonePanel();
     currentZoneId = lastId;
-    if (!samples || !samples.length) return;
-    var group = L.layerGroup();
-    var vals = [];
-    samples.forEach(function(s) {
-        var v = _agroParamValue(s, param);
-        if (v !== null) vals.push(v);
-    });
-    var min = vals.length ? Math.min.apply(null, vals) : 0;
-    var max = vals.length ? Math.max.apply(null, vals) : 1;
-    samples.forEach(function(s) {
-        var v = _agroParamValue(s, param);
-        var t = (v === null) ? null : _trackColorRange(v, min, max);
-        var c = (t === null) ? '#95a5a6' : _gradColor(t);
-        var mk = L.circleMarker([s.lat, s.lon], {radius: 6, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.9});
-        var unit = _agroParamUnits[param] || '';
-        mk.bindTooltip((s.name || '') + '<br>' + (_agroParamLabels[param] || param) + ': <b>' + (v === null ? 'н/д' : (v.toString().replace('.', ',')) + ' ' + unit) + '</b>');
-        group.addLayer(mk);
-    });
-    group.addTo(map);
-    _agroMainLayer = group;
-    var pts = samples.map(function(s) { return [s.lat, s.lon]; });
-    var bounds = L.latLngBounds(pts).pad(0.15);
-    if (geozoneLayers[zoneId]) {
-        var poly = geozoneLayers[zoneId].polygon;
-        if (poly && poly.getBounds) bounds.extend(poly.getBounds());
+
+    if (miniHasNdvi) {
+        showNdviOverlay(zoneId, miniNdviDate);
     }
-    map.fitBounds(bounds);
-    showAgroMainLegend(param, min, max);
+
+    if (miniHasAgro && samples && samples.length) {
+        var group = L.layerGroup();
+        var vals = [];
+        samples.forEach(function(s) {
+            var v = _agroParamValue(s, param);
+            if (v !== null) vals.push(v);
+        });
+        var min = vals.length ? Math.min.apply(null, vals) : 0;
+        var max = vals.length ? Math.max.apply(null, vals) : 1;
+        samples.forEach(function(s) {
+            var v = _agroParamValue(s, param);
+            var t = (v === null) ? null : _trackColorRange(v, min, max);
+            var c = (t === null) ? '#95a5a6' : _gradColor(t);
+            var mk = L.circleMarker([s.lat, s.lon], {radius: 6, color: '#fff', weight: 1, fillColor: c, fillOpacity: 0.9});
+            var unit = _agroParamUnits[param] || '';
+            mk.bindTooltip((s.name || '') + '<br>' + (_agroParamLabels[param] || param) + ': <b>' + (v === null ? 'н/д' : (v.toString().replace('.', ',')) + ' ' + unit) + '</b>');
+            group.addLayer(mk);
+        });
+        group.addTo(map);
+        _agroMainLayer = group;
+        showAgroMainLegend(param, min, max);
+        var pts = samples.map(function(s) { return [s.lat, s.lon]; });
+        var bounds = L.latLngBounds(pts).pad(0.15);
+        if (geozoneLayers[zoneId]) {
+            var poly = geozoneLayers[zoneId].polygon;
+            if (poly && poly.getBounds) bounds.extend(poly.getBounds());
+        }
+        map.fitBounds(bounds);
+    }
+
+    if (miniTrackLatlngs && miniTrackLatlngs.length > 1) {
+        _gpMainTrack = L.polyline(miniTrackLatlngs, {color: '#3498db', weight: 3, opacity: 0.9}).addTo(map);
+        map.fitBounds(L.latLngBounds(miniTrackLatlngs).pad(0.15));
+    }
 }
 
 function _agroMainLegendCtrl() {
