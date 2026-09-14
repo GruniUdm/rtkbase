@@ -683,7 +683,7 @@ function ensureMiniMap() {
     _gpMiniMap = L.map(el, {zoomControl: false, attributionControl: false, scrollWheelZoom: false, doubleClickZoom: false, dragging: false});
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution: ''}).addTo(_gpMiniMap);
     _gpMiniMap.on('dblclick', function() {
-        if (_gpAgroLayer) showAgroOnMainMap();
+        showAgroOnMainMap();
     });
 }
 
