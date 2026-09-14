@@ -2710,7 +2710,7 @@ function loadNdviDates(zoneId) {
                     hideAllNdviOverlays();
                     loadNdviDates(zoneId);
                     loadNdviStatus(zoneId);
-                    showNdviOverlay(zoneId, dateStr);
+                    showMiniMapNdviOverlay(zoneId, dateStr);
                 };
                 container.appendChild(btn);
             });
