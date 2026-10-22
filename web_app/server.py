@@ -1185,7 +1185,7 @@ def tractor_track_last(ip):
 @login_required
 def delete_tractor_track(ip):
     """Delete all track data for a tractor."""
-    gpkg_helper.delete_tractor_tracks(_db, ip)
+    gpkg_helper.delete_track(_db, ip)
     return json.dumps({'ok': True})
 
 @app.route('/tractor_map')
@@ -1200,12 +1200,27 @@ def tractor_map_page():
     return resp
 
 
+@app.route('/field_editor')
+@login_required
+def field_editor_page():
+    base_position = rtkbaseconfig.get("main", "position").replace("'", "").split()
+    base_coordinates = {"lat": float(base_position[0]), "lon": float(base_position[1])}
+    resp = app.make_response(render_template("field_editor.html", base_coordinates=base_coordinates))
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
+
+
 
 
 @app.route('/api/geozones')
 @login_required
 def list_geozones():
     ensure_migrated()
+    zones = gpkg_helper.list_geozones(_db)
+    for z in zones:
+        gpkg_helper.roll_zone_year(_db, z['id'])
     return json.dumps(gpkg_helper.list_geozones(_db))
 
 @app.route('/api/geozones', methods=['POST'])
@@ -1223,11 +1238,36 @@ def create_geozone():
 @login_required
 def update_geozone(zone_id):
     data = json.loads(request.data)
+    gpkg_helper.roll_zone_year(_db, zone_id)
     gpkg_helper.update_geozone(_db, zone_id, data)
     zone = gpkg_helper.get_geozone_by_id(_db, zone_id)
     if not zone:
         return (json.dumps({'error': 'not found'}), 404)
-    return json.dumps(zone)
+    if data.get('crop') is not None or data.get('planted_date') is not None or data.get('chemical_name') is not None or data.get('name') is not None:
+        gpkg_helper.upsert_crop_rotation(_db, zone_id, gpkg_helper.current_year(), zone)
+    return json.dumps(gpkg_helper.get_geozone_by_id(_db, zone_id))
+
+@app.route('/api/geozones/<zone_id>/rotation')
+@login_required
+def get_zone_rotation(zone_id):
+    ensure_migrated()
+    return json.dumps({'years': gpkg_helper.list_crop_rotation(_db, zone_id),
+                       'current_year': gpkg_helper.current_year()})
+
+@app.route('/api/geozones/<zone_id>/rotation', methods=['PUT'])
+@login_required
+def save_zone_rotation(zone_id):
+    data = json.loads(request.data)
+    year = int(data.get('year') or gpkg_helper.current_year())
+    gpkg_helper.upsert_crop_rotation(_db, zone_id, year, {
+        'name': data.get('name') or '',
+        'color': data.get('color') or '',
+        'crop': data.get('crop') or '',
+        'planted_date': data.get('planted_date') or '',
+        'chemical_name': data.get('chemical_name') or '',
+        'last_chemical': data.get('last_chemical') or ''})
+    return json.dumps({'years': gpkg_helper.list_crop_rotation(_db, zone_id),
+                       'current_year': gpkg_helper.current_year()})
 
 @app.route('/api/geozones/<zone_id>', methods=['DELETE'])
 @login_required
@@ -2436,6 +2476,31 @@ def import_field():
     _db.commit()
     return jsonify({'id': field_id, 'name': name}), 201
 
+@app.route('/api/fields/create', methods=['POST'])
+@login_required
+def create_field():
+    """Create a new field from raw field JSON (field editor split/combine).
+
+    Body: {"name": <new name>, "data": {<field json without name>}}
+    409 if the name already exists. Does not overwrite."""
+    _ensure_field_table()
+    body = json.loads(request.data)
+    name = (body.get('name') or '').strip()
+    data = body.get('data')
+    if not name or not isinstance(data, dict):
+        return jsonify({'error': 'name and data required'}), 400
+    row = _db.execute('SELECT 1 FROM field_data WHERE name=?', (name,)).fetchone()
+    if row:
+        return jsonify({'error': 'field exists', 'message': 'Поле с таким именем уже существует'}), 409
+    field_id = _field_uuid.uuid4().hex
+    now = int(time.time())
+    _db.execute(
+        'INSERT INTO field_data (id, name, data, created, updated) VALUES (?, ?, ?, ?, ?)',
+        (field_id, name, json.dumps(data), now, now)
+    )
+    _db.commit()
+    return jsonify({'ok': True, 'id': field_id, 'name': name, 'updated': now}), 201
+
 @app.route('/api/fields/<name>/export')
 @login_required
 def export_field(name):
@@ -2542,6 +2607,121 @@ def copy_field_element(name, key):
     _save_field_data(target_name, target_data)
     return jsonify({'field': target_name, 'key': new_key})
 
+
+#### Field editor: full save with backup + optimistic lock ####
+
+_FIELD_BACKUPS_KEEP = 5
+
+
+def _ensure_field_backups_table():
+    _db.execute(
+        "CREATE TABLE IF NOT EXISTS field_backups ("
+        "id TEXT PRIMARY KEY,"
+        "field_name TEXT NOT NULL,"
+        "data TEXT NOT NULL,"
+        "created INTEGER DEFAULT (strftime('%s','now'))"
+        ")"
+    )
+    _db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_field_backups_name ON field_backups(field_name, created DESC)"
+    )
+    _db.commit()
+
+
+def _prune_field_backups(field_name):
+    rows = _db.execute(
+        'SELECT id FROM field_backups WHERE field_name=? ORDER BY created DESC',
+        (field_name,)
+    ).fetchall()
+    for row in rows[_FIELD_BACKUPS_KEEP:]:
+        _db.execute('DELETE FROM field_backups WHERE id=?', (row[0],))
+    _db.commit()
+
+
+def _insert_field_backup(field_name, data_text):
+    _ensure_field_backups_table()
+    backup_id = _field_uuid.uuid4().hex
+    now = int(time.time())
+    _db.execute(
+        'INSERT INTO field_backups (id, field_name, data, created) VALUES (?, ?, ?, ?)',
+        (backup_id, field_name, data_text, now)
+    )
+    _db.commit()
+    _prune_field_backups(field_name)
+    return backup_id
+
+
+@app.route('/api/fields/<name>', methods=['PUT'])
+@login_required
+def save_field_full(name):
+    """Save the full field JSON from the field editor.
+
+    Body: {"data": {...field json...}, "base_updated": <updated the client loaded>}
+    Optimistic lock: rejects with 409 if the field was modified since.
+    The previous version is stored in field_backups before overwriting."""
+    _ensure_field_table()
+    body = json.loads(request.data)
+    data = body.get('data')
+    if not isinstance(data, dict):
+        return jsonify({'error': 'data object required'}), 400
+    base_updated = body.get('base_updated')
+    row = _db.execute(
+        'SELECT data, updated FROM field_data WHERE name=?', (name,)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': 'field not found'}), 404
+    current_updated = row[1]
+    if base_updated is not None and int(base_updated) != int(current_updated):
+        return jsonify({'error': 'conflict',
+                        'message': 'Поле было изменено после загрузки. Обновите страницу.',
+                        'current_updated': current_updated}), 409
+    _insert_field_backup(name, row[0])
+    now = int(time.time())
+    _db.execute(
+        'UPDATE field_data SET data=?, updated=? WHERE name=?',
+        (json.dumps(data), now, name)
+    )
+    _db.commit()
+    return jsonify({'ok': True, 'updated': now})
+
+
+@app.route('/api/fields/<name>/backups', methods=['GET'])
+@login_required
+def list_field_backups(name):
+    _ensure_field_backups_table()
+    rows = _db.execute(
+        'SELECT id, created FROM field_backups WHERE field_name=? ORDER BY created DESC',
+        (name,)
+    ).fetchall()
+    return jsonify([{'id': r[0], 'created': r[1]} for r in rows])
+
+
+@app.route('/api/fields/<name>/restore/<backup_id>', methods=['POST'])
+@login_required
+def restore_field_backup(name, backup_id):
+    _ensure_field_table()
+    _ensure_field_backups_table()
+    bak = _db.execute(
+        'SELECT data FROM field_backups WHERE id=? AND field_name=?',
+        (backup_id, name)
+    ).fetchone()
+    if not bak:
+        return jsonify({'error': 'backup not found'}), 404
+    row = _db.execute(
+        'SELECT data FROM field_data WHERE name=?', (name,)
+    ).fetchone()
+    if not row:
+        return jsonify({'error': 'field not found'}), 404
+    _insert_field_backup(name, row[0])
+    now = int(time.time())
+    _db.execute(
+        'UPDATE field_data SET data=?, updated=? WHERE name=?',
+        (bak[0], now, name)
+    )
+    _db.commit()
+    return jsonify({'ok': True, 'updated': now})
+
+
 #### Field → Geozone conversion ####
 
 import math as _math
@@ -2588,20 +2768,30 @@ def _get_field_ref(data, boundary_pts):
     return ref_lat, ref_lon
 
 
-def _local_to_latlon_rad(ref_lat, ref_lon, e, n):
-    if e == 0 and n == 0:
-        return (ref_lat, ref_lon)
-    earth_radius = 6378137.0
-    dlat = n / earth_radius
-    dlon = e / (earth_radius * math.cos(math.radians(ref_lat)))
-    return (ref_lat + math.degrees(dlat), ref_lon + math.degrees(dlon))
+def _m_lat_deg(lat):
+    """Meters per degree of latitude — same polynomial as QtAgOpenGPS CNMEA."""
+    r = math.radians(lat)
+    return (111132.92 - 559.82 * math.cos(2 * r)
+            + 1.175 * math.cos(4 * r) - 0.0023 * math.cos(6 * r))
 
 
-def _latlon_to_local_rad(ref_lat, ref_lon, lat, lon):
-    earth_radius = 6378137.0
-    n = math.radians(lat - ref_lat) * earth_radius
-    e = math.radians(lon - ref_lon) * earth_radius * math.cos(math.radians(ref_lat))
-    return (e, n)
+def _m_lon_deg(lat):
+    """Meters per degree of longitude — same polynomial as QtAgOpenGPS CNMEA."""
+    r = math.radians(lat)
+    return (111412.84 * math.cos(r) - 93.5 * math.cos(3 * r)
+            + 0.118 * math.cos(5 * r))
+
+
+def _latlon_to_local_plane(ref_lat, ref_lon, lat, lon):
+    """WGS84 -> local e/n using the LocalPlane polynomials that QtAgOpenGPS
+    (and aog-feldeditor) use for track/section coordinates."""
+    return ((lon - ref_lon) * _m_lon_deg(lat), (lat - ref_lat) * _m_lat_deg(ref_lat))
+
+
+def _local_to_latlon_plane(ref_lat, ref_lon, e, n):
+    lat = ref_lat + n / _m_lat_deg(ref_lat)
+    lon = ref_lon + e / _m_lon_deg(lat)
+    return (lat, lon)
 
 
 def _ab_extended_endpoints(ea, na, eb, nb, heading):
@@ -2657,8 +2847,8 @@ def _extract_fast_details(data, ref_lat, ref_lon):
         if ea is None or na is None or eb is None or nb is None:
             continue
         (ea2, na2), (eb2, nb2) = _ab_extended_endpoints(ea, na, eb, nb, ab_entry.get('heading'))
-        ll_a = _local_to_latlon_rad(ref_lat, ref_lon, ea2, na2)
-        ll_b = _local_to_latlon_rad(ref_lat, ref_lon, eb2, nb2)
+        ll_a = _local_to_latlon_plane(ref_lat, ref_lon, ea2, na2)
+        ll_b = _local_to_latlon_plane(ref_lat, ref_lon, eb2, nb2)
         coords = [[ll_a[1], ll_a[0]], [ll_b[1], ll_b[0]]]
         curve_pts = ab_entry.get('curvePts', [])
         if curve_pts and isinstance(curve_pts, list) and len(curve_pts) > 2:
@@ -2671,7 +2861,7 @@ def _extract_fast_details(data, ref_lat, ref_lon):
                     ce, cn = cp[0], cp[1]
                 else:
                     continue
-                ll = _local_to_latlon_rad(ref_lat, ref_lon, ce, cn)
+                ll = _local_to_latlon_plane(ref_lat, ref_lon, ce, cn)
                 curve_coords.append([ll[1], ll[0]])
             if len(curve_coords) >= 2:
                 coords = curve_coords
@@ -2787,8 +2977,8 @@ def _build_abline_entry(data, ptA_latlon, ptB_latlon, is_curve):
     Returns (entry dict, ref_lat, ref_lon)."""
     boundary_pts = _extract_field_boundary(data)
     ref_lat, ref_lon = _get_field_ref(data, boundary_pts)
-    eA, nA = _latlon_to_local_rad(ref_lat, ref_lon, ptA_latlon[0], ptA_latlon[1])
-    eB, nB = _latlon_to_local_rad(ref_lat, ref_lon, ptB_latlon[0], ptB_latlon[1])
+    eA, nA = _latlon_to_local_plane(ref_lat, ref_lon, ptA_latlon[0], ptA_latlon[1])
+    eB, nB = _latlon_to_local_plane(ref_lat, ref_lon, ptB_latlon[0], ptB_latlon[1])
 
     if not boundary_pts:
         if is_curve:
@@ -2802,7 +2992,7 @@ def _build_abline_entry(data, ptA_latlon, ptB_latlon, is_curve):
                 'curvePts': [], 'name': 'AB %.1f\u00b0' % math.degrees(heading),
                 'isVisible': True, 'nudgeDistance': 0}, ref_lat, ref_lon
 
-    boundary_local = [_latlon_to_local_rad(ref_lat, ref_lon, p[0], p[1]) for p in boundary_pts]
+    boundary_local = [_latlon_to_local_plane(ref_lat, ref_lon, p[0], p[1]) for p in boundary_pts]
     start = _nearest_boundary_index(boundary_local, eA, nA)
     end = _nearest_boundary_index(boundary_local, eB, nB)
 
@@ -2847,9 +3037,9 @@ def _track_entry_geometry(entry, ref_lat, ref_lon):
         coords = []
         for cp in curve:
             if isinstance(cp, dict):
-                ll = _local_to_latlon_rad(ref_lat, ref_lon, cp.get('easting', 0), cp.get('northing', 0))
+                ll = _local_to_latlon_plane(ref_lat, ref_lon, cp.get('easting', 0), cp.get('northing', 0))
             elif isinstance(cp, (list, tuple)) and len(cp) >= 2:
-                ll = _local_to_latlon_rad(ref_lat, ref_lon, cp[0], cp[1])
+                ll = _local_to_latlon_plane(ref_lat, ref_lon, cp[0], cp[1])
             else:
                 continue
             coords.append([ll[1], ll[0]])
@@ -2861,8 +3051,8 @@ def _track_entry_geometry(entry, ref_lat, ref_lon):
     eb = ptB.get('easting', 0)
     nb = ptB.get('northing', 0)
     (ea2, na2), (eb2, nb2) = _ab_extended_endpoints(ea, na, eb, nb, entry.get('heading'))
-    ll_a = _local_to_latlon_rad(ref_lat, ref_lon, ea2, na2)
-    ll_b = _local_to_latlon_rad(ref_lat, ref_lon, eb2, nb2)
+    ll_a = _local_to_latlon_plane(ref_lat, ref_lon, ea2, na2)
+    ll_b = _local_to_latlon_plane(ref_lat, ref_lon, eb2, nb2)
     return {'type': 'LineString', 'coordinates': [[ll_a[1], ll_a[0]], [ll_b[1], ll_b[0]]]}
 
 
@@ -2932,7 +3122,7 @@ def _convert_field_worker(data, name, color, now):
                     pt = pts[i + j]
                     if not isinstance(pt, (list, tuple)) or len(pt) < 2:
                         break
-                    ll = _local_to_latlon_rad(ref_lat, ref_lon, pt[0], pt[1])
+                    ll = _local_to_latlon_plane(ref_lat, ref_lon, pt[0], pt[1])
                     tri.append([ll[1], ll[0]])
                 if len(tri) == 3:
                     tri.append(tri[0])
@@ -3064,7 +3254,7 @@ def field_add_abline(name):
     geometry = _track_entry_geometry(entry, ref_lat, ref_lon)
     resp = {'ok': True, 'geometry': geometry,
             'heading_deg': round(math.degrees(entry['heading']), 1),
-            'name': entry['name'], 'mode': entry['mode']}
+            'name': entry['name'], 'mode': entry['mode'], 'entry': entry}
     if body.get('name'):
         data.setdefault('tracks', [])
         data['tracks'].append(entry)
@@ -3176,17 +3366,15 @@ def _yield_worker_alive(name):
         return False
 
 
-@app.route('/api/fields/<name>/yield/status', methods=['GET'])
-@login_required
-def field_yield_status(name):
+def _yield_status_for_field(name):
     data = _get_field_data(name)
     if not data:
-        return jsonify({'error': 'field not found'}), 404
+        return {'error': 'field not found'}
 
     yield_data = data.get('yieldData')
     records = yield_data.get('records') if yield_data else None
     if not records:
-        return jsonify({'state': 'empty'})
+        return {'state': 'empty'}
 
     updated = _field_updated(name)
     path = _field_yield_path(name)
@@ -3200,26 +3388,24 @@ def field_yield_status(name):
                 header = json.loads(f.readline())
             if header.get('updated') == updated and header.get('version') == 1:
                 _YIELD_JOBS.pop(name, None)
-                return jsonify({'state': 'ready', 'total': header.get('total', 0),
-                                'yield_min': header.get('yield_min', 0),
-                                'yield_max': header.get('yield_max', 0)})
+                return {'state': 'ready', 'total': header.get('total', 0),
+                        'yield_min': header.get('yield_min', 0),
+                        'yield_max': header.get('yield_max', 0)}
         except Exception:
             pass
 
     if name in _YIELD_JOBS:
-        return jsonify({'state': 'processing'})
+        return {'state': 'processing'}
 
     try:
         os.remove(path)
     except OSError:
         pass
     _start_yield_worker(name, path)
-    return jsonify({'state': 'processing'})
+    return {'state': 'processing'}
 
 
-@app.route('/api/fields/<name>/yield', methods=['GET'])
-@login_required
-def field_yield_content(name):
+def _yield_content_for_field(name):
     data = _get_field_data(name)
     if not data:
         return jsonify({'error': 'field not found'}), 404
@@ -3247,6 +3433,48 @@ def field_yield_content(name):
             pass
 
     return Response(stream_with_context(generate()), mimetype='application/json')
+
+
+@app.route('/api/fields/<name>/yield/status', methods=['GET'])
+@login_required
+def field_yield_status(name):
+    status = _yield_status_for_field(name)
+    if status.get('error'):
+        return jsonify({'error': status['error']}), 404
+    return jsonify(status)
+
+
+@app.route('/api/fields/<name>/yield', methods=['GET'])
+@login_required
+def field_yield_content(name):
+    return _yield_content_for_field(name)
+
+
+@app.route('/api/geozones/<zone_id>/yieldpatches/status')
+@login_required
+def geozone_yield_patches_status(zone_id):
+    zone = gpkg_helper.get_geozone_by_id(_db, zone_id)
+    if not zone:
+        return jsonify({'error': 'not found'}), 404
+    name = _find_field_for_zone(zone.get('name'))
+    if not name:
+        return jsonify({'state': 'empty'})
+    status = _yield_status_for_field(name)
+    if status.get('error'):
+        return jsonify({'state': 'empty'})
+    return jsonify(status)
+
+
+@app.route('/api/geozones/<zone_id>/yieldpatches')
+@login_required
+def geozone_yield_patches(zone_id):
+    zone = gpkg_helper.get_geozone_by_id(_db, zone_id)
+    if not zone:
+        return jsonify({'error': 'not found'}), 404
+    name = _find_field_for_zone(zone.get('name'))
+    if not name:
+        return jsonify({'error': 'not ready'}), 409
+    return _yield_content_for_field(name)
 
 
 if __name__ == "__main__":

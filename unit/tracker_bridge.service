@@ -1,0 +1,16 @@
+[Unit]
+Description=RTKBase 2G GPS Tracker Bridge (H02 -> NTRIP/GGA)
+After=network-online.target ntrip_proxy.service
+
+[Service]
+Type=simple
+SyslogIdentifier=tracker_bridge
+User=armsom
+Group=armsom
+WorkingDirectory=/home/armsom/rtkbase
+ExecStart=/home/armsom/rtkbase/venv/bin/python /home/armsom/rtkbase/web_app/tracker_bridge.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

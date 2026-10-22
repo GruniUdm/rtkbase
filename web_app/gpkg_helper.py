@@ -57,6 +57,17 @@ def _ensure_metadata(conn, retries=20):
                 num_swaths INTEGER,
                 created INTEGER)''')
             conn.execute("INSERT OR IGNORE INTO gpkg_contents VALUES ('path_tasks','attributes','path_tasks','','2024-01-01',NULL,NULL,NULL,NULL,NULL)")
+            conn.execute('''CREATE TABLE IF NOT EXISTS crop_rotation (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                zone_id TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                name TEXT, color TEXT, crop TEXT,
+                planted_date TEXT, chemical_name TEXT, last_chemical TEXT,
+                UNIQUE(zone_id, year))''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_crop_rotation_zone ON crop_rotation(zone_id)')
+            gz_cols = [r[1] for r in conn.execute('PRAGMA table_info(geozones)')]
+            if 'year' not in gz_cols:
+                conn.execute('ALTER TABLE geozones ADD COLUMN year INTEGER DEFAULT 0')
             conn.commit()
             return
         except sqlite3.OperationalError as e:
@@ -94,6 +105,7 @@ def _init_metadata(conn):
         fid INTEGER PRIMARY KEY AUTOINCREMENT, zone_id TEXT UNIQUE NOT NULL,
         name TEXT, color TEXT, crop TEXT, planted_date TEXT,
         last_chemical TEXT, chemical_name TEXT, created INTEGER,
+        year INTEGER DEFAULT 0,
         geom BLOB)''')
     c.execute("INSERT OR IGNORE INTO gpkg_contents VALUES ('geozones','features','geozones','','2024-01-01',-180,-90,180,90,4326)")
     c.execute("INSERT OR IGNORE INTO gpkg_geometry_columns VALUES ('geozones','geom','POLYGON',4326,'','')")
@@ -108,6 +120,14 @@ def _init_metadata(conn):
         num_swaths INTEGER,
         created INTEGER)''')
     c.execute("INSERT OR IGNORE INTO gpkg_contents VALUES ('path_tasks','attributes','path_tasks','','2024-01-01',NULL,NULL,NULL,NULL,NULL)")
+    c.execute('''CREATE TABLE IF NOT EXISTS crop_rotation (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        zone_id TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        name TEXT, color TEXT, crop TEXT,
+        planted_date TEXT, chemical_name TEXT, last_chemical TEXT,
+        UNIQUE(zone_id, year))''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_crop_rotation_zone ON crop_rotation(zone_id)')
     conn.commit()
 
 SRS_ID = 4326
@@ -249,20 +269,20 @@ def get_last_track_point(conn, ip):
     return None
 
 def list_geozones(conn):
-    cur = conn.execute('SELECT zone_id,name,color,crop,planted_date,last_chemical,chemical_name,created,geom FROM geozones ORDER BY name')
+    cur = conn.execute('SELECT zone_id,name,color,crop,planted_date,last_chemical,chemical_name,created,geom,year FROM geozones ORDER BY name')
     zones = []
     for row in cur:
         pts = parse_wkb_polygon(row[8]) if row[8] else []
         zones.append({'id': row[0], 'name': row[1] or '', 'color': row[2] or '#e67e22',
                       'crop': row[3] or '', 'planted_date': row[4] or '',
                       'last_chemical': row[5] or '', 'chemical_name': row[6] or '',
-                      'created': row[7] or 0, 'points': pts})
+                      'created': row[7] or 0, 'points': pts, 'year': row[9] or 0})
     return zones
 
 def create_geozone(conn, zone_id, name, points, color, now):
     geom = gpkg_polygon(points)
-    conn.execute('INSERT INTO geozones (zone_id,name,color,created,geom) VALUES (?,?,?,?,?)',
-                 (zone_id, name, color, now, geom))
+    conn.execute('INSERT INTO geozones (zone_id,name,color,created,year,geom) VALUES (?,?,?,?,?,?)',
+                 (zone_id, name, color, now, current_year(), geom))
     conn.commit()
 
 def update_geozone(conn, zone_id, data):
@@ -282,10 +302,11 @@ def update_geozone(conn, zone_id, data):
 
 def delete_geozone(conn, zone_id):
     conn.execute('DELETE FROM geozones WHERE zone_id=?', (zone_id,))
+    delete_crop_rotation_by_zone(conn, zone_id)
     conn.commit()
 
 def get_geozone_by_id(conn, zone_id):
-    cur = conn.execute('SELECT zone_id,name,color,crop,planted_date,last_chemical,chemical_name,created,geom FROM geozones WHERE zone_id=?', (zone_id,))
+    cur = conn.execute('SELECT zone_id,name,color,crop,planted_date,last_chemical,chemical_name,created,geom,year FROM geozones WHERE zone_id=?', (zone_id,))
     row = cur.fetchone()
     if not row:
         return None
@@ -293,7 +314,67 @@ def get_geozone_by_id(conn, zone_id):
     return {'id': row[0], 'name': row[1] or '', 'color': row[2] or '#e67e22',
             'crop': row[3] or '', 'planted_date': row[4] or '',
             'last_chemical': row[5] or '', 'chemical_name': row[6] or '',
-            'created': row[7] or 0, 'points': pts}
+            'created': row[7] or 0, 'points': pts, 'year': row[9] or 0}
+
+### Crop rotation season history (сезоны) ###
+
+def current_year():
+    import time as _t
+    return _t.localtime().tm_year
+
+def roll_zone_year(conn, zone_id):
+    """Archive the current field snapshot for the past season and start a clean sheet for the new one."""
+    row = conn.execute('SELECT year,name,color,crop,planted_date,last_chemical,chemical_name FROM geozones WHERE zone_id=?', (zone_id,)).fetchone()
+    if not row:
+        return
+    zy = row[0] or 0
+    cur = current_year()
+    if zy and zy < cur:
+        exists = conn.execute('SELECT 1 FROM crop_rotation WHERE zone_id=? AND year=?', (zone_id, zy)).fetchone()
+        if not exists and (row[3] or row[4] or row[6]):
+            upsert_crop_rotation(conn, zone_id, zy, {
+                'name': row[1], 'color': row[2], 'crop': row[3],
+                'planted_date': row[4], 'last_chemical': row[5], 'chemical_name': row[6]})
+        conn.execute('UPDATE geozones SET crop=?, planted_date=?, chemical_name=?, year=? WHERE zone_id=?',
+                     ('', '', '', cur, zone_id))
+    elif not zy:
+        conn.execute('UPDATE geozones SET year=? WHERE zone_id=?', (cur, zone_id))
+    conn.commit()
+
+def list_crop_rotation(conn, zone_id):
+    cur = conn.execute('SELECT zone_id,year,name,color,crop,planted_date,chemical_name,last_chemical FROM crop_rotation WHERE zone_id=? ORDER BY year DESC', (zone_id,))
+    rows = []
+    for r in cur:
+        rows.append({'zone_id': r[0], 'year': r[1], 'name': r[2] or '',
+                     'color': r[3] or '#e67e22', 'crop': r[4] or '',
+                     'planted_date': r[5] or '', 'chemical_name': r[6] or '',
+                     'last_chemical': r[7] or ''})
+    return rows
+
+def get_crop_rotation_year(conn, zone_id, year):
+    row = conn.execute('SELECT zone_id,year,name,color,crop,planted_date,chemical_name,last_chemical FROM crop_rotation WHERE zone_id=? AND year=?', (zone_id, year)).fetchone()
+    if not row:
+        return None
+    return {'zone_id': row[0], 'year': row[1], 'name': row[2] or '',
+            'color': row[3] or '#e67e22', 'crop': row[4] or '',
+            'planted_date': row[5] or '', 'chemical_name': row[6] or '',
+            'last_chemical': row[7] or ''}
+
+def upsert_crop_rotation(conn, zone_id, year, data):
+    conn.execute('''INSERT INTO crop_rotation (zone_id,year,name,color,crop,planted_date,chemical_name,last_chemical)
+        VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(zone_id, year) DO UPDATE SET
+            name=excluded.name, color=excluded.color, crop=excluded.crop,
+            planted_date=excluded.planted_date, chemical_name=excluded.chemical_name,
+            last_chemical=excluded.last_chemical''',
+        (zone_id, year, data.get('name') or '', data.get('color') or '#e67e22',
+         data.get('crop') or '', data.get('planted_date') or '',
+         data.get('chemical_name') or '', data.get('last_chemical') or ''))
+    conn.commit()
+
+def delete_crop_rotation_by_zone(conn, zone_id):
+    conn.execute('DELETE FROM crop_rotation WHERE zone_id=?', (zone_id,))
+    conn.commit()
 
 ### Path tasks ###
 

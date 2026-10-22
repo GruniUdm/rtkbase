@@ -1,0 +1,185 @@
+{% extends 'base.html' %}
+
+{% block styles %}
+{{super()}}
+<link rel="stylesheet" href="{{ url_for('static', filename='lib/leaflet-1.7.css') }}">
+<style>
+    #map { height: calc(100vh - 170px); min-height: 400px; }
+    .fe-toolbar {
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        padding: 8px 0;
+    }
+    .fe-toolbar .btn { white-space: nowrap; }
+    #currentFieldName { font-weight: 600; color: #333; }
+    .fe-sidebar { max-height: calc(100vh - 260px); overflow-y: auto; }
+    .fe-field-item {
+        cursor: pointer; padding: 5px 8px; border-bottom: 1px solid #eee; font-size: 0.9em;
+    }
+    .fe-field-item:hover { background-color: #f0f0f0; }
+    .fe-field-item.active { background-color: #d4edda; font-weight: 600; }
+    .fe-layer-toggle { margin-right: 10px; font-size: 0.85em; }
+    #feStatus { font-size: 0.85em; color: #6c757d; margin-left: auto; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="fe-toolbar">
+        <h5 class="mb-0 mr-2">Редактор полей</h5>
+        <span id="currentFieldName">—</span>
+        <button class="btn btn-sm btn-success" id="btnSave" disabled>Сохранить</button>
+        <button class="btn btn-sm btn-outline-secondary" id="btnUndo" disabled title="Отменить (Undo)">↶ Отменить</button>
+        <button class="btn btn-sm btn-outline-secondary" id="btnReload" title="Перезагрузить поле">⟳</button>
+        <span id="feStatus"></span>
+    </div>
+    <div class="row">
+        <div class="col-md-3" id="leftPanel">
+            <div class="card">
+                <div class="card-header" onclick="$('#fieldListBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Поля <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="fieldListBody" style="display:none;padding:4px;">
+                    <div class="fe-sidebar" id="fieldList">
+                        <div class="text-muted" style="padding:8px;">Загрузка...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card mt-2">
+                <div class="card-header" onclick="$('#backupsBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Версии поля <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="backupsBody" style="display:none;">
+                    <button class="btn btn-sm btn-outline-secondary btn-block mb-1" id="btnBackupsRefresh">Обновить список</button>
+                    <div id="backupsList"><div class="text-muted" style="font-size:0.85em;">Откройте поле</div></div>
+                </div>
+            </div>
+            <div class="card mt-2">
+                <div class="card-header" onclick="$('#tracksBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    AB-линии и кривые <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="tracksBody" style="display:none;">
+                    <button class="btn btn-sm btn-outline-primary btn-block mb-1" id="btnCreateAB">+ AB-линия (2 клика)</button>
+                    <button class="btn btn-sm btn-outline-primary btn-block mb-1" id="btnCreateCurve">+ Кривая по границе (2 клика)</button>
+                    <div id="tracksHint" style="display:none;font-size:0.8em;color:#6c757d;padding:2px 0;"></div>
+                    <hr style="margin:6px 0;">
+                    <div id="tracksList"><div class="text-muted" style="font-size:0.85em;">Откройте поле</div></div>
+                </div>
+            </div>
+            <div class="card mt-2">
+                <div class="card-header" onclick="$('#headlandBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Гон <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="headlandBody" style="display:none;">
+                    <div class="form-inline mb-1">
+                        <label class="mr-2" style="font-size:0.85em;" for="headlandDist">Отступ, м</label>
+                        <input type="number" class="form-control form-control-sm" id="headlandDist" value="20" min="1" step="0.5" style="width:80px;">
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary btn-block mb-1" id="btnHeadlandPreview">Предпросмотр</button>
+                    <button class="btn btn-sm btn-success btn-block mb-1" id="btnHeadlandApply">Записать гон</button>
+                    <button class="btn btn-sm btn-outline-danger btn-block mb-1" id="btnHeadlandClear">Удалить гон</button>
+                </div>
+            </div>
+            <div class="card mt-2">
+                <div class="card-header" onclick="$('#layersBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Слои <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="layersBody" style="display:none;">
+                    <div><label><input type="checkbox" class="fe-layer-toggle" data-layer="boundary" checked> Граница</label></div>
+                    <div><label><input type="checkbox" class="fe-layer-toggle" data-layer="inner" checked> Внутренние границы</label></div>
+                    <div><label><input type="checkbox" class="fe-layer-toggle" data-layer="headland" checked> Гон</label></div>
+                    <div><label><input type="checkbox" class="fe-layer-toggle" data-layer="headLines" checked> Треки (headLines)</label></div>
+                    <div><label><input type="checkbox" class="fe-layer-toggle" data-layer="abLine" checked> AB-линии / кривые</label></div>
+                    <div><label><input type="checkbox" class="fe-layer-toggle" data-layer="origin" checked> Начало координат</label></div>
+                </div>
+            </div>
+            <div class="card mt-2">
+                <div class="card-header" onclick="$('#boundaryBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Граница <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="boundaryBody" style="display:none;">
+                    <button class="btn btn-sm btn-outline-primary btn-block mb-1" id="btnBoundaryEdit">Редактировать границу</button>
+                    <button class="btn btn-sm btn-outline-secondary btn-block mb-1" id="btnDrawOuter">Новая внешняя граница</button>
+                    <button class="btn btn-sm btn-outline-secondary btn-block mb-1" id="btnDrawInner">Новая внутренняя граница</button>
+                    <button class="btn btn-sm btn-success btn-block mb-1" id="btnDrawFinish" style="display:none;">Готово</button>
+                    <button class="btn btn-sm btn-danger btn-block mb-1" id="btnDrawCancel" style="display:none;">Отмена</button>
+                    <div id="boundaryOffsetInfo" style="display:none;font-size:0.85em;color:#c0392b;padding:2px 0;"></div>
+                    <div id="boundaryHint" style="display:none;font-size:0.8em;color:#6c757d;padding:2px 0;"></div>
+                    <hr style="margin:6px 0;">
+                    <div style="font-size:0.85em;font-weight:600;">Внутренние границы</div>
+                    <div id="boundaryInnerList"><div class="text-muted" style="font-size:0.85em;">Откройте поле</div></div>
+                </div>
+            </div>
+            <div class="card mt-2">
+                <div class="card-header" onclick="$('#originBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Начало координат <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="originBody" style="display:none;">
+                    <button class="btn btn-sm btn-outline-primary btn-block mb-1" id="btnOriginMove">Перенести startFix</button>
+                    <div id="originHint" style="display:none;font-size:0.8em;color:#6c757d;padding:2px 0;"></div>
+                    <div style="font-size:0.78em;color:#6c757d;">Граница и гон хранятся в lat/lon и не изменятся. AB-линии, секции и урожайность будут пересчитаны под новый origin.</div>
+                </div>
+            </div>
+            <div class="card mt-2">
+                <div class="card-header" onclick="$('#toolsBody').toggle();$(this).find('.collapse-icon').toggleClass('collapsed');">
+                    Инструменты <span class="collapse-icon collapsed">▼</span>
+                </div>
+                <div class="card-body" id="toolsBody" style="display:none;">
+                    <button class="btn btn-sm btn-outline-secondary btn-block mb-1" id="btnMeasure">Мерка</button>
+                    <div id="measureHint" style="display:none;font-size:0.8em;color:#6c757d;padding:2px 0;"></div>
+                    <div id="measureInfo" style="display:none;font-size:0.85em;color:#16a085;font-weight:600;padding:2px 0;"></div>
+                    <hr style="margin:6px 0;">
+                    <button class="btn btn-sm btn-outline-primary btn-block mb-1" id="btnSplit">Разрезать поле</button>
+                    <button class="btn btn-sm btn-outline-primary btn-block mb-1" id="btnCombine">Объединить поля</button>
+                    <div id="toolHint" style="display:none;font-size:0.8em;color:#6c757d;padding:2px 0;"></div>
+                    <div id="toolSelectRow" style="display:none;padding:2px 0;">
+                        <select class="form-control form-control-sm" id="toolSelect"></select>
+                    </div>
+                    <div id="toolNameRow" style="display:none;padding:2px 0;">
+                        <label id="toolNameLabel" style="font-size:0.8em;color:#6c757d;margin-bottom:0;">Имя нового поля</label>
+                        <input class="form-control form-control-sm" id="toolName" type="text">
+                    </div>
+                    <button class="btn btn-sm btn-success btn-block mb-1" id="btnToolOk" style="display:none;">Выполнить</button>
+                    <button class="btn btn-sm btn-outline-danger btn-block mb-1" id="btnToolCancel" style="display:none;">Отмена</button>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-9" style="padding-left:0;">
+            <div id="map"></div>
+        </div>
+    </div>
+    <div class="text-muted" style="font-size:0.75em;padding-top:6px;">
+        Геометрия и сценарии редактирования на основе
+        <a href="https://github.com/SkaFUU/aog-feldeditor" target="_blank" rel="noopener">aog-feldeditor</a> (SkaFUU, MIT).
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{super()}}
+<script type="text/javascript" src="{{ url_for('static', filename='lib/leaflet-1.7.js') }}"></script>
+<script>
+var baseCoordinates = {{ base_coordinates|tojson }};
+</script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-plane.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-api.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-core.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-boundary.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-tracks.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-headland.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-origin.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-tools.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-split.js') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='field_editor/fe-backups.js') }}"></script>
+<script>
+$(document).ready(function () {
+    FE.boot(baseCoordinates);
+    FE.boundary.init();
+    FE.tracks.init();
+    FE.headland.init();
+    FE.origin.init();
+    FE.measure.init();
+    FE.split.init();
+    FE.backups.init();
+});
+</script>
+{% endblock %}

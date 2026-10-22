@@ -184,6 +184,7 @@
                     Файлы полей <span class="collapse-icon collapsed">▼</span>
                 </div>
                 <div class="card-body" id="fieldFilesBody" style="display:none;">
+                    <a class="btn btn-sm btn-outline-primary btn-block mb-2" href="/field_editor">Редактор полей ↗</a>
                     <div id="fieldFileList" style="max-height:300px;overflow-y:auto;">
                         <span class="text-muted" style="padding:4px;font-size:0.85em;">Загрузка...</span>
                     </div>
@@ -264,6 +265,7 @@
                 <div style="color:#666;font-size:0.85em;margin-bottom:10px;">
                     Площадь: <b id="gpArea"></b> га &middot; Периметр: <b id="gpPerimeter"></b> м
                     <span id="gpCropBadge" class="badge" style="margin-left:6px;display:none;"></span>
+                    <select id="gpYearSel" style="margin-left:8px;font-size:0.85em;padding:1px 4px;border:1px solid #ccc;border-radius:3px;" onchange="selectRotationYear(this.value)"></select>
                 </div>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;">
@@ -299,16 +301,36 @@
                                     </div>
                                 </div>
                             </div>
-                            <button class="btn btn-sm btn-primary" onclick="saveEditZone()">Сохранить</button>
+                            <button class="btn btn-sm btn-primary" id="editZoneSaveBtn" onclick="saveEditZone()">Сохранить</button>
                             <span id="gpSaveMsg" style="font-size:0.85em;color:green;margin-left:6px;"></span>
                         </div>
                     </div>
                 </div>
 
                 <div class="card sidebar-card">
-                    <div class="card-header">Урожайность</div>
-                    <div class="card-body">
+                    <div class="card-header" onclick="toggleGpYield(this);">
+                        Урожайность <span class="collapse-icon collapsed">&#9660;</span>
+                    </div>
+                    <div class="card-body" id="gpYieldBody" style="display:none;">
                         <div id="yieldSummary" class="text-muted">—</div>
+                        <div id="gpYieldLegend" style="margin-top:6px;display:none;">
+                            <div style="display:flex;height:14px;border-radius:3px;overflow:hidden;border:1px solid #ccc;">
+                                <div style="flex:1;background:#e74c3c;"></div>
+                                <div style="flex:1;background:#e67e22;"></div>
+                                <div style="flex:1;background:#f1c40f;"></div>
+                                <div style="flex:1;background:#2ecc71;"></div>
+                                <div style="flex:1;background:#1a7a3a;"></div>
+                            </div>
+                            <div style="display:flex;font-size:10px;color:#666;">
+                                <span style="flex:1;">0</span>
+                                <span style="flex:1;text-align:center;">10</span>
+                                <span style="flex:1;text-align:center;">20</span>
+                                <span style="flex:1;text-align:center;">30</span>
+                                <span style="flex:2;text-align:right;">40+ ц/га</span>
+                            </div>
+                        </div>
+                        <button class="btn btn-sm btn-info btn-block" id="showYieldBtn" style="display:none;margin-top:4px;">Show Yield Overlay</button>
+                        <button class="btn btn-sm btn-outline-danger btn-block" id="hideYieldBtn" style="display:none;margin-top:4px;">Hide Yield</button>
                     </div>
                 </div>
 
@@ -453,9 +475,14 @@
                     <button type="button" id="previewABCancelBtn" onclick="cancelPreviewAB()" style="cursor:pointer;display:none;">Отмена</button>
                 </span>
                 <span id="previewABHint" style="color:#888;display:none;margin-left:8px;"></span>
+                <span id="yieldAreaControls" style="margin-left:10px;display:none;">
+                    <button type="button" id="yieldAreaBtn" onclick="toggleYieldAreaMode()" style="cursor:pointer;">Среднее по области</button>
+                    <button type="button" id="yieldAreaDoneBtn" onclick="yieldAreaDone()" style="cursor:pointer;display:none;margin-left:4px;">Завершить</button>
+                    <span id="yieldAreaHint" style="color:#888;display:none;margin-left:8px;"></span>
+                </span>
                 <button type="button" onclick="closeFieldPreview()" title="Закрыть просмотр" style="margin-left:8px;border:none;background:none;font-size:1.1em;cursor:pointer;color:#dc3545;line-height:1;">&times;</button>
             </div>
-            <div id="yieldLegend" style="display:none;position:absolute;bottom:40px;right:10px;z-index:1000;background:rgba(255,255,255,0.95);border:1px solid #ccc;border-radius:4px;padding:6px 10px;font-size:0.8em;box-shadow:0 1px 4px rgba(0,0,0,.2);">
+            <div id="yieldLegend" style="display:none;position:fixed;bottom:20px;right:12px;z-index:2000;background:rgba(255,255,255,0.95);border:1px solid #ccc;border-radius:4px;padding:6px 10px;font-size:0.8em;box-shadow:0 1px 4px rgba(0,0,0,.2);">
                 <div style="font-weight:600;margin-bottom:4px;">Урожайность, ц/га</div>
                 <div style="display:flex;align-items:center;margin-bottom:2px;"><span style="display:inline-block;width:18px;height:12px;background:#e74c3c;margin-right:6px;border:1px solid #ccc;"></span> &lt; 10</div>
                 <div style="display:flex;align-items:center;margin-bottom:2px;"><span style="display:inline-block;width:18px;height:12px;background:#e67e22;margin-right:6px;border:1px solid #ccc;"></span> 10 – 20</div>
@@ -515,6 +542,6 @@
 <script>
 var baseCoordinates = {{ base_coordinates|tojson }};
 </script>
-<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5089') }}"></script>
+<script type="text/javascript" src="{{ url_for('static', filename='tractor_map.js', v='5114') }}"></script>
 {% endblock %}
 

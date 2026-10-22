@@ -167,6 +167,7 @@ $(document).ready(function () {
     // Load geozones
     loadGeozones();
     map.on('dblclick', onMapDblClick);
+    map.on('click', onYieldPickClick);
 
     // Load tracks from URL params and localStorage (run immediately and on socket connect)
     function loadTracksFromParams() {
@@ -601,6 +602,77 @@ function editGeozone(id) {
     loadYieldSummary(id);
     loadFieldOps(id);
     loadAgroSamples(id);
+    loadCropRotation(id);
+}
+
+var _rotationYears = [];
+var _rotationCurrentYear = 0;
+
+function loadCropRotation(id) {
+    fetch('/api/geozones/' + id + '/rotation')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            _rotationYears = d.years || [];
+            _rotationCurrentYear = d.current_year || new Date().getFullYear();
+            fillRotationYears(_rotationCurrentYear);
+        })
+        .catch(function() {});
+}
+
+function fillRotationYears(selectedYear) {
+    var sel = document.getElementById('gpYearSel');
+    if (!sel) return;
+    var cur = _rotationCurrentYear;
+    var set = {};
+    set[cur] = true;
+    _rotationYears.forEach(function(y) { set[y.year] = true; });
+    var list = Object.keys(set).map(Number).sort(function(a, b) { return b - a; });
+    sel.innerHTML = '';
+    list.forEach(function(y) {
+        var opt = document.createElement('option');
+        opt.value = y;
+        opt.textContent = 'Сезон ' + y + (y === cur ? ' (текущий)' : '');
+        sel.appendChild(opt);
+    });
+    var v = selectedYear || cur;
+    if (list.indexOf(v) === -1) v = cur;
+    sel.value = String(v);
+    selectRotationYear(v);
+}
+
+function selectRotationYear(year) {
+    var id = currentZoneId;
+    if (!id) return;
+    var v = parseInt(year, 10);
+    if (isNaN(v)) return;
+    var sel = document.getElementById('gpYearSel');
+    if (sel && sel.value !== String(v)) sel.value = String(v);
+    var rec = null;
+    for (var i = 0; i < _rotationYears.length; i++) {
+        if (_rotationYears[i].year === v) { rec = _rotationYears[i]; break; }
+    }
+    var isCurrent = (v === _rotationCurrentYear);
+    var z = geozoneLayers[id] ? geozoneLayers[id].data : null;
+    var name = rec ? rec.name : (isCurrent && z ? z.name : '');
+    var crop = rec ? rec.crop : (isCurrent && z ? z.crop : '');
+    var planted = rec ? rec.planted_date : (isCurrent && z ? z.planted_date : '');
+    var chem = rec ? rec.chemical_name : (isCurrent && z ? z.chemical_name : '');
+    $('#editZoneName').val(name || '');
+    $('#editZoneCrop').val(crop || '');
+    $('#editZonePlanted').val(planted || '');
+    $('#editZoneChemName').val(chem || '');
+    var ro = !isCurrent;
+    ['editZoneName', 'editZoneCrop', 'editZonePlanted', 'editZoneChemName'].forEach(function(k) {
+        var el = document.getElementById(k);
+        if (el) el.disabled = ro;
+    });
+    var saveBtn = document.getElementById('editZoneSaveBtn');
+    if (saveBtn) saveBtn.style.display = ro ? 'none' : '';
+    if (crop) {
+        $('#gpCropBadge').text(crop).css('background', rec ? rec.color : (z ? z.color : '#e67e22')).css('color', '#fff').show();
+    } else {
+        $('#gpCropBadge').hide();
+    }
 }
 
 function openGeozonePanel(id) {
@@ -641,6 +713,7 @@ function closeGeozonePanel() {
     _pendingAlertTrack = null;
     if (lastId) hideNdviOverlay(lastId);
     hideMiniMapNdviOverlay();
+    hideMiniMapYieldOverlay();
     hideAgroPoints();
     var p = document.getElementById('geozonePanel');
     if (p) p.style.display = 'none';
@@ -693,6 +766,7 @@ function drawMiniMap(zone) {
     if (!_gpMiniMap || !zone) return;
     _gpMiniMap.invalidateSize();
     hideMiniMapNdviOverlay();
+    hideMiniMapYieldOverlay();
     if (_gpMiniPolygon) { _gpMiniMap.removeLayer(_gpMiniPolygon); _gpMiniPolygon = null; }
     if (_gpMiniTrack) { _gpMiniMap.removeLayer(_gpMiniTrack); _gpMiniTrack = null; _gpMiniTrackRaw = null; }
     if (_gpAgroLayer) {
@@ -767,6 +841,139 @@ function hideMiniMapNdviOverlay() {
         _gpMiniNdviOverlay = null;
     }
 }
+
+// -------- Урожайность на мини-карте (в панели геозоны) --------
+
+var _gpYieldLayer = null;
+var _gpYieldBounds = null;
+var _yieldMiniSeq = 0;
+
+function toggleGpYield(hdr) {
+    var body = document.getElementById('gpYieldBody');
+    var hidden = !body || body.style.display === 'none';
+    if (body) body.style.display = hidden ? '' : 'none';
+    if (hdr) {
+        var ic = hdr.querySelector('.collapse-icon');
+        if (ic) ic.classList.toggle('collapsed');
+    }
+    if (!hidden) {
+        hideMiniMapYieldOverlay();
+        return;
+    }
+    if (currentZoneId) {
+        loadYieldSummary(currentZoneId);
+        showMiniMapYieldOverlay(currentZoneId);
+    }
+}
+
+function hideMiniMapYieldOverlay() {
+    if (_gpYieldLayer && _gpMiniMap) {
+        _gpMiniMap.removeLayer(_gpYieldLayer);
+        _gpYieldLayer = null;
+    }
+    _gpYieldBounds = null;
+    $("#gpYieldLegend").hide();
+    $("#showYieldBtn").hide();
+    $("#hideYieldBtn").hide();
+}
+
+function showMiniMapYieldOverlay(zoneId) {
+    ensureMiniMap();
+    if (!_gpMiniMap) return;
+    hideMiniMapYieldOverlay();
+    var seq = ++_yieldMiniSeq;
+    fetch('/api/geozones/' + encodeURIComponent(zoneId) + '/yieldpatches/status')
+        .then(function(r) { return r.json(); })
+        .then(function(s) {
+            if (seq !== _yieldMiniSeq) return;
+            var el = document.getElementById('yieldSummary');
+            if (s.state === 'ready') {
+                fetchZoneYieldPatches(zoneId, seq);
+            } else if (s.state === 'processing') {
+                if (el) el.textContent = 'Обработка данных урожайности...';
+                setTimeout(function() {
+                    if (seq === _yieldMiniSeq) showMiniMapYieldOverlay(zoneId);
+                }, 1500);
+            } else {
+                if (el) el.textContent = 'Нет данных об урожайности';
+            }
+        })
+        .catch(function(e) { console.log('yield status error:', e); });
+}
+
+function fetchZoneYieldPatches(zoneId, seq) {
+    fetch('/api/geozones/' + encodeURIComponent(zoneId) + '/yieldpatches')
+        .then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            var reader = res.body.getReader();
+            var decoder = new TextDecoder();
+            var buf = '';
+            var first = true;
+
+            function pump() {
+                return reader.read().then(function(r) {
+                    if (seq !== _yieldMiniSeq) return;
+                    if (r.done) {
+                        if (buf.trim() && !first) {
+                            try { addYieldPatch(JSON.parse(buf)); } catch(e) {}
+                        }
+                        finalize();
+                        return;
+                    }
+                    buf += decoder.decode(r.value, {stream: true});
+                    var lines = buf.split('\n');
+                    buf = lines.pop();
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i].trim();
+                        if (!line) continue;
+                        if (first) { first = false; continue; }
+                        try { addYieldPatch(JSON.parse(line)); } catch(e) {}
+                    }
+                    return pump();
+                });
+            }
+            return pump();
+        })
+        .catch(function(e) { console.log('yield stream error:', e); });
+
+    function addYieldPatch(obj) {
+        var yv = obj.yield;
+        if (!(yv >= 5) || !(yv <= 100)) return;
+        var ring = (obj.ring && obj.ring[0]) || [];
+        var ll = [];
+        for (var k = 0; k < ring.length; k++) ll.push([ring[k][1], ring[k][0]]);
+        if (ll.length < 3) return;
+        if (!_gpYieldLayer) {
+            _gpYieldLayer = L.layerGroup().addTo(_gpMiniMap);
+        }
+        var c = obj.color_gradient || obj.color_aog || '#2ecc71';
+        var poly = L.polygon([ll], {color: c, weight: 0, fillOpacity: 0.8, fillColor: c}).addTo(_gpYieldLayer);
+        poly.bindPopup('Урожайность: <b>' + yv.toFixed(2) + '</b> ц/га', {closeButton: false});
+        if (_gpYieldBounds) {
+            _gpYieldBounds.extend(ll[0]);
+            _gpYieldBounds.extend(ll[ll.length - 1]);
+        } else {
+            _gpYieldBounds = L.latLngBounds([ll[0], ll[ll.length - 1]]);
+        }
+    }
+
+    function finalize() {
+        if (seq !== _yieldMiniSeq) return;
+        if (_gpYieldLayer) {
+            if (_gpYieldBounds) _gpMiniMap.fitBounds(_gpYieldBounds.pad(0.05));
+            $("#gpYieldLegend").show();
+            $("#showYieldBtn").hide();
+            $("#hideYieldBtn").show();
+        }
+    }
+}
+
+$("#showYieldBtn").click(function() {
+    if (currentZoneId) showMiniMapYieldOverlay(currentZoneId);
+});
+$("#hideYieldBtn").click(function() {
+    hideMiniMapYieldOverlay();
+});
 
 // -------- Детекция движения тракторов (список для оператора) --------
 
@@ -943,6 +1150,8 @@ function loadAlertSessionTrack(ip, fromTs, toTs) {
                 opacity: 0.8
             }).addTo(map);
             polyline.bindTooltip(ip + ' · ' + _fmtTime(fromTs) + '–' + _fmtTime(toTs), {sticky: true});
+            polyline._points = points;
+            attachTrackColor(polyline, ip, 'track');
             tractorTracks[ip] = polyline;
             polyline._hide = false;
             map.fitBounds(polyline.getBounds().pad(0.1));
@@ -1001,18 +1210,52 @@ function showOpTrackOnMiniMap(opId) {
         alert('Трек для этой работы сохранён не был');
         return;
     }
-try {
-            var track = JSON.parse(op.track_data);
-            if (!track || track.length < 2) {
-                alert('Трек для этой работы пуст');
-                return;
-            }
-            var simplified = _simplifyTrack(track);
-            drawMiniMapTrack(simplified.map(function(p) { return [p.lat, p.lon]; }), null, simplified);
-            _gpMiniMap.fitBounds(L.latLngBounds(simplified.map(function(p) { return [p.lat, p.lon]; })).pad(0.1));
-        } catch (e) {
+    var track;
+    try {
+        track = JSON.parse(op.track_data);
+    } catch (e) {
         alert('Не удалось разобрать трек: ' + e.message);
+        return;
     }
+    if (!track || track.length < 2) {
+        alert('Трек для этой работы пуст');
+        return;
+    }
+    enrichOpTrackFromGpkg(op, track).then(function(enriched) {
+        var simplified = _simplifyTrack(enriched);
+        drawMiniMapTrack(simplified.map(function(p) { return [p.lat, p.lon]; }), null, simplified);
+        _gpMiniMap.fitBounds(L.latLngBounds(simplified.map(function(p) { return [p.lat, p.lon]; })).pad(0.1));
+    });
+}
+
+function enrichOpTrackFromGpkg(op, track) {
+    /* Если в track_data только координаты (без satellites/altitude/hdop),
+       дозагружаем полные данные из GPKG по machinery и интервалу времени. */
+    if (!track || !track.length) return Promise.resolve(track);
+    var p0 = track[0];
+    var hasFull = p0 && (p0.satellites !== undefined || p0.altitude !== undefined ||
+                         p0.q !== undefined || p0.alt !== undefined || p0.s !== undefined || p0.h !== undefined);
+    if (hasFull) return Promise.resolve(track);
+    var ip = (op.machinery || '').trim();
+    if (!ip) return Promise.resolve(track);
+    var minT = track[0].t, maxT = track[0].t;
+    for (var i = 0; i < track.length; i++) {
+        if (track[i].t < minT) minT = track[i].t;
+        if (track[i].t > maxT) maxT = track[i].t;
+    }
+    var url = '/api/tractor_track/' + encodeURIComponent(ip) + '?from=' + minT + '&to=' + maxT;
+    return fetch(url)
+        .then(function(r) { return r.json(); })
+        .then(function(full) {
+            if (!full || !full.length) return track;
+            var byT = {};
+            full.forEach(function(p) { byT[p.t] = p; });
+            return track.map(function(p) {
+                var q = byT[p.t];
+                return q ? q : p;
+            });
+        })
+        .catch(function() { return track; });
 }
 
 function showGpOpOnMainMap(opId) {
@@ -1027,14 +1270,12 @@ function showGpOpOnMainMap(opId) {
         alert('Трек для этой работы сохранён не был');
         return;
     }
-    try {
-        var track = JSON.parse(op.track_data);
-        if (!track || track.length < 2) {
-            alert('Трек для этой работы пуст');
-            return;
-        }
-        var zone = geozoneLayers[zoneId];
-        if (!zone) { alert('Поле не найдено на карте'); return; }
+    var zone = geozoneLayers[zoneId];
+    if (!zone) { alert('Поле не найдено на карте'); return; }
+    var track;
+    try { track = JSON.parse(op.track_data); } catch (e) { alert('Не удалось разобрать трек: ' + e.message); return; }
+    if (!track || track.length < 2) { alert('Трек для этой работы пуст'); return; }
+    enrichOpTrackFromGpkg(op, track).then(function(enriched) {
         closeGeozonePanel();
         currentZoneId = null;
         focusGeozone(zoneId);
@@ -1043,9 +1284,9 @@ function showGpOpOnMainMap(opId) {
             map.removeLayer(opTrackLayers[opId]);
             delete opTrackLayers[opId];
         }
-        var latlngs = track.map(function(p) { return [p.lat, p.lon]; });
+        var latlngs = enriched.map(function(p) { return [p.lat, p.lon]; });
         var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
-        polyline._points = track;
+        polyline._points = enriched;
         attachTrackColor(polyline, 'op_' + opId, 'op');
         var popup = '<b>' + escapeHtml(op.op_type || '') + '</b><br>' +
             (op.op_date || '') + '<br>' +
@@ -1057,9 +1298,7 @@ function showGpOpOnMainMap(opId) {
         polyline.openPopup();
         opTrackLayers[opId] = polyline;
         map.fitBounds(polyline.getBounds().pad(0.15));
-    } catch (e) {
-        alert('Не удалось разобрать трек: ' + e.message);
-    }
+    });
 }
 
 function loadFieldOps(zoneId) {
@@ -1176,6 +1415,8 @@ function deleteFieldOp(opId) {
 
 var opTrackLayers = {};
 var _opsSearchCache = [];
+var _colorGroupLayers = {};
+var OPS_GROUP_KEY = 'opsel';
 
 function searchFieldOps() {
     var params = new URLSearchParams();
@@ -1236,23 +1477,29 @@ function showSingleOpTrack(idx) {
     closeGeozonePanel();
     currentZoneId = null;
     focusGeozone(o.zone_id);
+    var key = 'op_' + o.id;
+    resetTrackColorL(key);
     if (opTrackLayers[o.id]) {
         map.removeLayer(opTrackLayers[o.id]);
         delete opTrackLayers[o.id];
         return;
     }
-    var latlngs = track.map(function(p) { return [p.lat, p.lon]; });
-    var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
-    var popup = '<b>' + escapeHtml(o.op_type || '') + '</b><br>' +
-        (o.op_date || '') + '<br>' +
-        (o.operator ? 'Механизатор: ' + escapeHtml(o.operator) + '<br>' : '') +
-        (o.machinery ? 'Агрегат: ' + escapeHtml(o.machinery) + '<br>' : '') +
-        (o.material ? 'Препарат: ' + escapeHtml(o.material) + '<br>' : '') +
-        (o.zone_name ? 'Поле: ' + escapeHtml(o.zone_name) : '');
-    polyline.bindPopup(popup);
-    polyline.openPopup();
-    opTrackLayers[o.id] = polyline;
-    map.fitBounds(polyline.getBounds().pad(0.15));
+    enrichOpTrackFromGpkg(o, track).then(function(enriched) {
+        var latlngs = enriched.map(function(p) { return [p.lat, p.lon]; });
+        var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
+        polyline._points = enriched;
+        attachTrackColor(polyline, key, 'op');
+        var popup = '<b>' + escapeHtml(o.op_type || '') + '</b><br>' +
+            (o.op_date || '') + '<br>' +
+            (o.operator ? 'Механизатор: ' + escapeHtml(o.operator) + '<br>' : '') +
+            (o.machinery ? 'Агрегат: ' + escapeHtml(o.machinery) + '<br>' : '') +
+            (o.material ? 'Препарат: ' + escapeHtml(o.material) + '<br>' : '') +
+            (o.zone_name ? 'Поле: ' + escapeHtml(o.zone_name) : '');
+        polyline.bindPopup(popup);
+        polyline.openPopup();
+        opTrackLayers[o.id] = polyline;
+        map.fitBounds(polyline.getBounds().pad(0.15));
+    });
 }
 
 function showSelectedOpTracks() {
@@ -1266,29 +1513,42 @@ function showSelectedOpTracks() {
     clearOpsTracks();
     var allBounds = [];
     var colors = ['#e67e22', '#2ecc71', '#3498db', '#e74c3c', '#9b59b6', '#1abc9c', '#f39c12', '#e91e63'];
+    var tasks = [];
     checked.forEach(function(idx, ci) {
         var o = _opsSearchCache[idx];
         if (!o || !o.track_data) return;
         var track;
         try { track = JSON.parse(o.track_data); } catch(e) { return; }
         if (!track || track.length < 2) return;
-        var latlngs = track.map(function(p) { return [p.lat, p.lon]; });
-        var color = colors[ci % colors.length];
-        var polyline = L.polyline(latlngs, {color: color, weight: 4, opacity: 0.85}).addTo(map);
-        var popup = '<b>' + escapeHtml(o.op_type || '') + '</b><br>' +
-            (o.op_date || '') + '<br>' +
-            (o.operator ? 'Механизатор: ' + escapeHtml(o.operator) + '<br>' : '') +
-            (o.machinery ? 'Агрегат: ' + escapeHtml(o.machinery) + '<br>' : '') +
-            (o.zone_name ? 'Поле: ' + escapeHtml(o.zone_name) : '');
-        polyline.bindPopup(popup);
-        opTrackLayers['sel_' + idx] = polyline;
-        allBounds.push(polyline.getBounds());
+        tasks.push(enrichOpTrackFromGpkg(o, track).then(function(enriched) { return {o: o, enriched: enriched, color: colors[ci % colors.length]}; }));
     });
-    if (allBounds.length) {
-        var combined = L.latLngBounds(allBounds[0]);
-        allBounds.forEach(function(b) { combined.extend(b); });
-        map.fitBounds(combined.pad(0.15));
-    }
+    Promise.all(tasks).then(function(items) {
+        var groupPolylines = [];
+        var groupPoints = [];
+        items.forEach(function(item) {
+            var polyline = L.polyline(item.enriched.map(function(p) { return [p.lat, p.lon]; }),
+                {color: item.color, weight: 4, opacity: 0.85}).addTo(map);
+            polyline._points = item.enriched;
+            attachTrackColor(polyline, OPS_GROUP_KEY, 'op');
+            groupPolylines.push(polyline);
+            groupPoints = groupPoints.concat(item.enriched);
+            var popup = '<b>' + escapeHtml(item.o.op_type || '') + '</b><br>' +
+                (item.o.op_date || '') + '<br>' +
+                (item.o.operator ? 'Механизатор: ' + escapeHtml(item.o.operator) + '<br>' : '') +
+                (item.o.machinery ? 'Агрегат: ' + escapeHtml(item.o.machinery) + '<br>' : '') +
+                (item.o.zone_name ? 'Поле: ' + escapeHtml(item.o.zone_name) : '');
+            polyline.bindPopup(popup);
+            opTrackLayers['sel_' + item.o.id] = polyline;
+            allBounds.push(polyline.getBounds());
+        });
+        _colorGroupLayers[OPS_GROUP_KEY] = groupPolylines;
+        trackRawPoints[OPS_GROUP_KEY] = groupPoints;
+        if (allBounds.length) {
+            var combined = L.latLngBounds(allBounds[0]);
+            allBounds.forEach(function(b) { combined.extend(b); });
+            map.fitBounds(combined.pad(0.15));
+        }
+    });
 }
 
 function clearOpsTracks() {
@@ -1297,6 +1557,9 @@ function clearOpsTracks() {
         delete opTrackLayers[k];
         resetTrackColorL('op_' + k);
     }
+    resetTrackColorL(OPS_GROUP_KEY);
+    _colorGroupLayers = {};
+    delete trackRawPoints[OPS_GROUP_KEY];
 }
 
 // -------- Обработка сессий из архива --------
@@ -1435,13 +1698,23 @@ function showSessionVisitTrack(idx) {
     if (!v || !v.track || v.track.length < 2) return;
     var zone = geozoneLayers[v.zone_id];
     if (!zone) return;
+    var key = 'visit_' + idx;
+    resetTrackColorL(key);
+    if (opTrackLayers[key]) {
+        map.removeLayer(opTrackLayers[key]);
+        delete opTrackLayers[key];
+    }
     currentZoneId = null;
     focusGeozone(v.zone_id);
     var latlngs = v.track.map(function(p) { return [p.lat, p.lon]; });
     var polyline = L.polyline(latlngs, {color: '#e67e22', weight: 4, opacity: 0.85}).addTo(map);
-    polyline.bindPopup('<b>' + escapeHtml(v.zone_name) + '</b><br>' + v.alert_date + ' ' + _fmtTime(v.first_seen) + '–' + _fmtTime(v.last_seen));
+    polyline._points = v.track;
+    attachTrackColor(polyline, key, 'track');
+    var popup = '<b>' + escapeHtml(v.zone_name) + '</b><br>' + v.alert_date + ' ' + _fmtTime(v.first_seen) + '–' + _fmtTime(v.last_seen) +
+        '<br>' + escapeHtml(v.tractor_ip || '') + ' · ' + v.points_count + ' точек';
+    polyline.bindPopup(popup);
     polyline.openPopup();
-    opTrackLayers['visit_' + idx] = polyline;
+    opTrackLayers[key] = polyline;
     map.fitBounds(polyline.getBounds().pad(0.15));
 }
 
@@ -1627,6 +1900,13 @@ function saveEditZone() {
             $('#gpCropBadge').hide();
         }
         $('#gpSaveMsg').text('Сохранено').fadeOut(1500);
+        var saveBtn = document.getElementById('editZoneSaveBtn');
+        if (saveBtn) saveBtn.style.display = '';
+        ['editZoneName', 'editZoneCrop', 'editZonePlanted', 'editZoneChemName'].forEach(function(k) {
+            var el = document.getElementById(k);
+            if (el) el.disabled = false;
+        });
+        loadCropRotation(id);
     });
 }
 
@@ -2251,6 +2531,8 @@ function applyTrackColor(key) {
     if (!layer) {
         layer = opTrackLayers[key.indexOf('op_') === 0 ? key.slice(3) : key];
     }
+    var groupLayers = _colorGroupLayers[key];
+    if (!layer && groupLayers && groupLayers.length) layer = groupLayers[0];
     var raw = trackRawPoints[key] || (layer && layer._points) || null;
     if (!layer || !raw) { alert('Нет данных трека'); return; }
     var sel = document.getElementById('tcParam_' + key);
@@ -2290,8 +2572,13 @@ function applyTrackColor(key) {
     }
     group.addTo(map);
     trackColorLayers[key] = group;
-    group._colorBaseLayer = layer;
-    map.removeLayer(layer);
+    if (groupLayers && groupLayers.length) {
+        group._colorBaseLayers = groupLayers;
+        groupLayers.forEach(function(l) { map.removeLayer(l); });
+    } else {
+        group._colorBaseLayer = layer;
+        map.removeLayer(layer);
+    }
 }
 
 function showTrackColorLegend(param, min, max) {
@@ -2337,11 +2624,12 @@ function showTrackColorLegend(param, min, max) {
 function toggleTrackPoints(key) {
     var grp = trackColorLayers[key];
     if (!grp) return;
+    var base = grp._colorBaseLayers || (grp._colorBaseLayer ? [grp._colorBaseLayer] : []);
     if (map.hasLayer(grp)) {
         map.removeLayer(grp);
-        if (grp._colorBaseLayer) map.addLayer(grp._colorBaseLayer);
-    } else if (grp._colorBaseLayer) {
-        map.removeLayer(grp._colorBaseLayer);
+        base.forEach(function(b) { map.addLayer(b); });
+    } else {
+        base.forEach(function(b) { map.removeLayer(b); });
         grp.addTo(map);
     }
 }
@@ -2350,7 +2638,8 @@ function resetTrackColorL(key) {
     var grp = trackColorLayers[key];
     if (grp) {
         map.removeLayer(grp);
-        if (grp._colorBaseLayer) map.addLayer(grp._colorBaseLayer);
+        var base = grp._colorBaseLayers || (grp._colorBaseLayer ? [grp._colorBaseLayer] : []);
+        base.forEach(function(b) { map.addLayer(b); });
         delete trackColorLayers[key];
     }
     if (!Object.keys(trackColorLayers).length && _trackMapLegend) {
@@ -4724,11 +5013,13 @@ function showFieldPreviewBar(name) {
     document.getElementById('previewABBtn').disabled = false;
     _yieldPolyCache = [];
     bar.style.display = 'block';
+    updateYieldAreaUI();
 }
 
 function hideFieldPreviewBar() {
     var bar = document.getElementById('fieldPreviewBar');
     if (bar) {
+        if (yieldAreaMode) exitYieldAreaMode(false);
         var controls = document.getElementById('previewABControls');
         var hint = document.getElementById('previewABHint');
         if (controls) controls.style.display = 'none';
@@ -4895,7 +5186,7 @@ function setYieldColorMode(mode) {
 function _updateYieldLegend() {
     var el = document.getElementById('yieldLegend');
     if (!el) return;
-    var visible = fieldPreview && fieldPreview.layers.yield && map.hasLayer(fieldPreview.layers.yield);
+    var visible = fieldPreview && _yieldPolyCache.length > 0;
     el.style.display = visible ? 'block' : 'none';
 }
 
@@ -4909,11 +5200,14 @@ function _renderYieldCache() {
         for (var k = 0; k < ring.length; k++) {
             ll.push([ring[k][1], ring[k][0]]);
         }
+        var yv = (item.yield !== undefined && item.yield !== null) ? Number(item.yield) : NaN;
+        if (yv < 5 || yv > 100) continue;
         var c = yieldColorMode === 'gradient' ? item.color_gradient : item.color_aog;
         c = c || '#27ae60';
-        var opts = {color: c, weight: 0, fillOpacity: 0.4, fillColor: c};
-        L.polygon([ll], opts).addTo(fieldPreview.layers.yield);
+        var opts = {color: c, weight: 0, fillOpacity: 0.8, fillColor: c, interactive: false};
+        var poly = L.polygon([ll], opts).addTo(fieldPreview.layers.yield);
     }
+    _updateYieldLegend();
 }
 
 function loadFieldPreviewYield(name, seq) {
@@ -5035,6 +5329,179 @@ function fetchYieldStream(name, seq) {
 
 function escapeJs(s) {
     return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+}
+
+// === Yield area tool: select a polygon, show area-weighted average yield ===
+var yieldAreaMode = false;
+var yieldAreaPoints = [];
+var yieldAreaLayer = null;
+
+function toggleYieldAreaMode() {
+    if (!fieldPreview) return;
+    yieldAreaMode = !yieldAreaMode;
+    if (yieldAreaMode) {
+        if (measureMode) toggleMeasureMode();
+        if (previewABActive) exitPreviewAB();
+        yieldAreaPoints = [];
+        if (yieldAreaLayer) { map.removeLayer(yieldAreaLayer); yieldAreaLayer = null; }
+        yieldAreaLayer = L.layerGroup().addTo(map);
+        map.getContainer().style.cursor = 'crosshair';
+        map.on('click', onYieldAreaClick);
+        map.on('dblclick', onYieldAreaDblClick);
+        map.doubleClickZoom.disable();
+    } else {
+        exitYieldAreaMode(false);
+    }
+    updateYieldAreaUI();
+}
+
+function exitYieldAreaMode(keepLayer) {
+    yieldAreaMode = false;
+    map.off('click', onYieldAreaClick);
+    map.off('dblclick', onYieldAreaDblClick);
+    map.doubleClickZoom.enable();
+    map.getContainer().style.cursor = '';
+    if (!keepLayer && yieldAreaLayer) { map.removeLayer(yieldAreaLayer); yieldAreaLayer = null; }
+    yieldAreaPoints = [];
+    updateYieldAreaUI();
+}
+
+function yieldAreaDone() {
+    if (!yieldAreaMode) return;
+    if (yieldAreaPoints.length < 3) { alert('Поставьте минимум 3 точки'); return; }
+    computeYieldAreaStats();
+    exitYieldAreaMode(true);
+}
+
+function updateYieldAreaUI() {
+    var controls = document.getElementById('yieldAreaControls');
+    var hint = document.getElementById('yieldAreaHint');
+    var btn = document.getElementById('yieldAreaBtn');
+    var doneBtn = document.getElementById('yieldAreaDoneBtn');
+    if (!controls || !hint || !btn) return;
+    controls.style.display = fieldPreview ? '' : 'none';
+    btn.style.background = yieldAreaMode ? '#e67e22' : '';
+    btn.style.color = yieldAreaMode ? '#fff' : '';
+    if (doneBtn) doneBtn.style.display = yieldAreaMode ? 'inline-block' : 'none';
+    hint.style.display = yieldAreaMode ? 'inline' : 'none';
+    hint.textContent = yieldAreaMode ? 'Клики — вершины, затем «Завершить»' : '';
+}
+
+function onYieldAreaClick(e) {
+    if (!yieldAreaMode || !yieldAreaLayer) return;
+    e.originalEvent.preventDefault();
+    yieldAreaPoints.push([e.latlng.lat, e.latlng.lng]);
+    L.circleMarker(e.latlng, {
+        radius: 4, color: '#e67e22', fillColor: '#e67e22', fillOpacity: 1, weight: 2
+    }).addTo(yieldAreaLayer);
+    redrawYieldAreaPoly();
+}
+
+function redrawYieldAreaPoly() {
+    var old = null;
+    yieldAreaLayer.eachLayer(function(l) { if (l instanceof L.Polygon) old = l; });
+    if (old) yieldAreaLayer.removeLayer(old);
+    if (yieldAreaPoints.length >= 2) {
+        L.polygon(yieldAreaPoints, {
+            color: '#e67e22', weight: 2, dashArray: '4,4',
+            fillColor: '#e67e22', fillOpacity: 0.15
+        }).addTo(yieldAreaLayer);
+    }
+}
+
+function onYieldAreaDblClick(e) {
+    if (!yieldAreaMode) return;
+    e.originalEvent.preventDefault();
+    e.originalEvent.stopPropagation();
+    if (yieldAreaPoints.length < 3) { exitYieldAreaMode(false); return; }
+    computeYieldAreaStats();
+    exitYieldAreaMode(true);
+}
+
+function pointInPolygon(pt, poly) {
+    var x = pt[1], y = pt[0];
+    var inside = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        var pi = poly[i], pj = poly[j];
+        var xi = Array.isArray(pi) ? pi[1] : pi.lng;
+        var yi = Array.isArray(pi) ? pi[0] : pi.lat;
+        var xj = Array.isArray(pj) ? pj[1] : pj.lng;
+        var yj = Array.isArray(pj) ? pj[0] : pj.lat;
+        if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+}
+
+function computeYieldAreaStats() {
+    var polyPoints = yieldAreaPoints;
+    var polyArea = computePolygonArea(polyPoints);
+    if (polyArea <= 0) return;
+    var polyBounds = L.latLngBounds(polyPoints).pad(0.002);
+    var sumArea = 0, sumByArea = 0, count = 0;
+    for (var i = 0; i < _yieldPolyCache.length; i++) {
+        var item = _yieldPolyCache[i];
+        var ring0 = item.ring && item.ring[0];
+        if (!ring0 || ring0.length < 3) continue;
+        var ll = [];
+        for (var k = 0; k < ring0.length; k++) ll.push([ring0[k][1], ring0[k][0]]);
+        var cellBounds = L.latLngBounds(ll);
+        if (!polyBounds.intersects(cellBounds)) continue;
+        var cellArea = computePolygonArea(ll);
+        if (cellArea <= 0) continue;
+        var inside = 0;
+        for (k = 0; k < ll.length; k++) if (pointInPolygon(ll[k], polyPoints)) inside++;
+        var w = 0;
+        if (inside === ll.length) {
+            w = cellArea;
+        } else if (inside > 0) {
+            var N = 8;
+            var minLat = cellBounds.getSouth(), maxLat = cellBounds.getNorth();
+            var minLng = cellBounds.getWest(), maxLng = cellBounds.getEast();
+            var hits = 0, tot = N * N;
+            for (var r = 0; r < N; r++) {
+                for (var c = 0; c < N; c++) {
+                    var lat = minLat + (r + 0.5) * (maxLat - minLat) / N;
+                    var lng = minLng + (c + 0.5) * (maxLng - minLng) / N;
+                    if (pointInPolygon([lat, lng], polyPoints)) hits++;
+                }
+            }
+            w = cellArea * hits / tot;
+        }
+        if (w > 0) {
+            var yVal = Number(item.yield);
+            if (!isNaN(yVal)) { sumByArea += yVal * w; sumArea += w; count++; }
+        }
+    }
+    if (sumArea <= 0) {
+        alert('В выбранной области нет патчей урожайности');
+        return;
+    }
+    var avg = sumByArea / sumArea;
+    var center = polyBounds.getCenter();
+    L.popup({closeButton: false}).setLatLng(center).setContent(
+        '<b>Средняя урожайность:</b> ' + avg.toFixed(1) + ' ц/га' +
+        '<br><b>Площадь области:</b> ' + formatArea(polyArea) +
+        '<br><b>Патчей:</b> ' + count
+    ).openOn(map);
+}
+
+function onYieldPickClick(e) {
+    if (yieldAreaMode || measureMode || previewABActive || !fieldPreview || !_yieldPolyCache.length) return;
+    var lat = e.latlng.lat, lng = e.latlng.lng;
+    var pts = [lat, lng];
+    for (var i = 0; i < _yieldPolyCache.length; i++) {
+        var item = _yieldPolyCache[i];
+        var ring0 = item.ring && item.ring[0];
+        if (!ring0 || ring0.length < 3) continue;
+        var ll = [];
+        for (var k = 0; k < ring0.length; k++) ll.push([ring0[k][1], ring0[k][0]]);
+        if (!pointInPolygon(pts, ll)) continue;
+        var yv = (item.yield !== undefined && item.yield !== null) ? Number(item.yield) : NaN;
+        var html = '<div style="font-size:0.9em;">Урожайность: <b>' +
+            (isNaN(yv) ? 'н/д' : yv.toFixed(2) + ' ц/га') + '</b></div>';
+        L.popup({closeButton: false}).setLatLng(e.latlng).setContent(html).openOn(map);
+        return;
+    }
 }
 
 var _fieldFileMenuVisible = false;
@@ -5439,7 +5906,11 @@ function computePolygonArea(latlngs) {
     for (var i = 0; i < latlngs.length; i++) {
         var p1 = latlngs[i];
         var p2 = latlngs[(i + 1) % latlngs.length];
-        area += (p2.lng - p1.lng) * d2r * (2 + Math.sin(p1.lat * d2r) + Math.sin(p2.lat * d2r));
+        var lng1 = Array.isArray(p1) ? p1[1] : p1.lng;
+        var lat1 = Array.isArray(p1) ? p1[0] : p1.lat;
+        var lng2 = Array.isArray(p2) ? p2[1] : p2.lng;
+        var lat2 = Array.isArray(p2) ? p2[0] : p2.lat;
+        area += (lng2 - lng1) * d2r * (2 + Math.sin(lat1 * d2r) + Math.sin(lat2 * d2r));
     }
     return Math.abs(area * R * R / 2);
 }

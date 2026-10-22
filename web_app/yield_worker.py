@@ -10,12 +10,14 @@ PULSE_GAP_THRESHOLD = 3
 
 
 def _local_to_latlon_rad(ref_lat, ref_lon, e, n):
-    if e == 0 and n == 0:
-        return (ref_lat, ref_lon)
-    earth_radius = 6378137.0
-    dlat = n / earth_radius
-    dlon = e / (earth_radius * math.cos(math.radians(ref_lat)))
-    return (ref_lat + math.degrees(dlat), ref_lon + math.degrees(dlon))
+    # LocalPlane polynomials — same projection QtAgOpenGPS uses for e/n data
+    lat = ref_lat + n / (111132.92 - 559.82 * math.cos(2 * math.radians(ref_lat))
+                         + 1.175 * math.cos(4 * math.radians(ref_lat))
+                         - 0.0023 * math.cos(6 * math.radians(ref_lat)))
+    lon = ref_lon + e / (111412.84 * math.cos(math.radians(lat))
+                         - 93.5 * math.cos(3 * math.radians(lat))
+                         + 0.118 * math.cos(5 * math.radians(lat)))
+    return (lat, lon)
 
 
 def _argb_to_hex(argb_int):
