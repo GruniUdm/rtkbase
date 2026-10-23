@@ -4773,6 +4773,15 @@ function showFieldOnMap(name) {
                 } catch(e) {}
             }
 
+            // inner boundaries (holes inside the outer boundary)
+            (data.inner || []).forEach(function(ring) {
+                if (!ring || ring.length < 3) return;
+                L.polyline(ring.concat([ring[0]]), {
+                    color: '#f39c12', weight: 2, opacity: 0.9,
+                    dashArray: '4,4', interactive: false
+                }).addTo(group);
+            });
+
             // fast details (tracks / headland / abLine)
             data.details.forEach(function(d) {
                 var geo = d.geometry;

@@ -3225,7 +3225,15 @@ def field_details_for_preview(name):
     ref_lat, ref_lon = _get_field_ref(data, boundary_pts)
     details = [{'type': t, 'geometry': g, 'style': s}
                for t, (g, s) in _extract_fast_details(data, ref_lat, ref_lon).items()]
-    return jsonify({'name': name, 'boundary': boundary_pts, 'details': details})
+    inner = []
+    for poly in ((data.get('boundary') or {}).get('polygons') or [])[1:]:
+        pts = poly.get('points') or []
+        ring = [[p[0], p[1]] for p in pts
+                if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if len(ring) >= 3:
+            inner.append(ring)
+    return jsonify({'name': name, 'boundary': boundary_pts,
+                    'inner': inner, 'details': details})
 
 
 @app.route('/api/fields/<name>/abline', methods=['POST'])
