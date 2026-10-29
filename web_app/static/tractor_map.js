@@ -107,7 +107,14 @@ $(document).ready(function () {
         attribution: '&copy; EOX / Copernicus Sentinel'
     });
     osm.addTo(map);
-    var layerControl = L.control.layers({'Map': osm, 'Satellite': sat, 'Sentinel-2': s2, 'Contrast NDVI': s2Contrast}, null, {position: 'bottomleft'}).addTo(map);
+    // Public cadastre map (EGRN parcels) through the local tile proxy.
+    var cadastre = L.tileLayer('/api/cadastre/tile/{z}/{x}/{y}.png', {
+        attribution: '&copy; Росреестр / НСПД',
+        maxNativeZoom: 17,
+        maxZoom: 20,
+        opacity: 0.9
+    });
+    var layerControl = L.control.layers({'Map': osm, 'Satellite': sat, 'Sentinel-2': s2, 'Contrast NDVI': s2Contrast}, {'Кадастровая карта (ЕГРН)': cadastre}, {position: 'bottomleft'}).addTo(map);
     window._whLayers = {'Map': osm, 'Satellite': sat, 'Sentinel-2': s2, 'Contrast NDVI': s2Contrast};
     window._whActive = 'Map';
 

@@ -13,7 +13,8 @@ FE.undoLimit = 30;
 
 FE.layers = {};         // L.LayerGroup per group key
 FE.layerVisibility = {
-    boundary: true, inner: true, headland: true, headLines: true, abLine: true, origin: true
+    boundary: true, inner: true, headland: true, headLines: true, abLine: true,
+    origin: true, cadastre: false
 };
 
 // hooks: arrays of callbacks { afterOpen: [], afterUndo: [], afterClose: [] }
@@ -39,6 +40,15 @@ FE.initMap = function (baseCoordinates) {
     });
     osm.addTo(map);
     L.control.layers({ 'Map': osm, 'Satellite': sat, 'Sentinel-2': s2 }, null, { position: 'bottomleft' }).addTo(map);
+
+    // Public cadastre map (EGRN parcels) served through our tile proxy.
+    FE.cadastreLayer = L.tileLayer('/api/cadastre/tile/{z}/{x}/{y}.png', {
+        attribution: '&copy; Росреестр / НСПД',
+        maxNativeZoom: 17,
+        maxZoom: 20,
+        opacity: 0.9
+    });
+    if (FE.layerVisibility.cadastre) FE.cadastreLayer.addTo(map);
     var baseIcon = L.icon({
         iconUrl: '/static/images/iconmonstr-crosshair-6-64.png',
         iconSize: [24, 24],
@@ -245,6 +255,12 @@ FE.fitFieldBounds = function () {
 // -------- layer toggles --------
 FE.toggleLayer = function (key, visible) {
     FE.layerVisibility[key] = visible;
+    if (key === 'cadastre') {
+        if (!FE.cadastreLayer) return;
+        if (visible) FE.cadastreLayer.addTo(FE.map);
+        else if (FE.map.hasLayer(FE.cadastreLayer)) FE.map.removeLayer(FE.cadastreLayer);
+        return;
+    }
     var g = FE.layers[key];
     if (!g) return;
     if (visible) { if (!FE.map.hasLayer(g)) g.addTo(FE.map); }

@@ -40,6 +40,7 @@ import shutil
 import signal
 import sys
 import requests
+import base64
 import math
 import re
 from threading import Lock
@@ -577,6 +578,21 @@ GEOZONE_COLORS = ['#e67e22', '#2980b9', '#27ae60', '#8e44ad', '#d35400', '#1abc9
 _db = gpkg_helper.connect(GPKG_PATH)
 
 TRACK_DIR = os.path.join(rtkbase_path, 'data', 'tracks')
+
+# Public cadastre map (EGRN land parcels) tiles come from NSPD. The upstream
+# server rejects requests whose Referer is not nspd.gov.ru, so the browser
+# cannot hotlink them; we proxy and cache the tiles on disk.
+CADASTRE_TILE_CACHE = os.path.join(rtkbase_path, 'data', 'cadastre_tiles')
+CADASTRE_TILE_URL = 'https://nspd.gov.ru/api/aeggis/v4/36048/wmts/{z}/{x}/{y}.png'
+CADASTRE_TILE_HEADERS = {
+    'Referer': 'https://nspd.gov.ru/map?thematic=PKK',
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/130.0.0.0 Safari/537.36'),
+}
+CADASTRE_EMPTY_TILE = base64.b64decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk'
+    'YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==')
 
 def migrate_csv_to_gpkg():
     track_dir = TRACK_DIR
@@ -3234,6 +3250,44 @@ def field_details_for_preview(name):
             inner.append(ring)
     return jsonify({'name': name, 'boundary': boundary_pts,
                     'inner': inner, 'details': details})
+
+
+def _empty_cadastre_tile():
+    """1x1 transparent PNG for tiles the upstream has no data for."""
+    return Response(CADASTRE_EMPTY_TILE, mimetype='image/png',
+                    headers={'Cache-Control': 'public, max-age=3600'})
+
+
+@app.route('/api/cadastre/tile/<int:z>/<int:x>/<int:y>.png', methods=['GET'])
+@login_required
+def cadastre_tile(z, x, y):
+    """Proxy NSPD EGRN land-parcel tiles (layer 36048) with a disk cache."""
+    if z < 0 or z > 20:
+        abort(404)
+    n = 1 << z
+    if not (0 <= x < n and 0 <= y < n):
+        abort(404)
+    cache_path = os.path.join(CADASTRE_TILE_CACHE, str(z), str(x), '%d.png' % y)
+    if os.path.isfile(cache_path):
+        return send_file(cache_path, mimetype='image/png', max_age=604800)
+    try:
+        upstream = requests.get(CADASTRE_TILE_URL.format(z=z, x=x, y=y),
+                                headers=CADASTRE_TILE_HEADERS, timeout=15)
+    except requests.RequestException:
+        return _empty_cadastre_tile()
+    if (upstream.status_code != 200
+            or not upstream.content.startswith(b'\x89PNG\r\n\x1a\n')):
+        return _empty_cadastre_tile()
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        tmp_path = '%s.%d.%d.tmp' % (cache_path, os.getpid(), time.time_ns())
+        with open(tmp_path, 'wb') as f:
+            f.write(upstream.content)
+        os.replace(tmp_path, cache_path)
+    except OSError:
+        pass
+    return Response(upstream.content, mimetype='image/png',
+                    headers={'Cache-Control': 'public, max-age=604800'})
 
 
 @app.route('/api/fields/<name>/abline', methods=['POST'])
