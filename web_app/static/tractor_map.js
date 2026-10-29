@@ -112,7 +112,7 @@ $(document).ready(function () {
         attribution: '&copy; Росреестр / НСПД',
         maxNativeZoom: 17,
         maxZoom: 20,
-        opacity: 0.9
+        opacity: 0.7
     });
     var layerControl = L.control.layers({'Map': osm, 'Satellite': sat, 'Sentinel-2': s2, 'Contrast NDVI': s2Contrast}, {'Кадастровая карта (ЕГРН)': cadastre}, {position: 'bottomleft'}).addTo(map);
     window._whLayers = {'Map': osm, 'Satellite': sat, 'Sentinel-2': s2, 'Contrast NDVI': s2Contrast};

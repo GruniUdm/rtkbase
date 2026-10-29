@@ -3271,8 +3271,16 @@ def cadastre_tile(z, x, y):
     if os.path.isfile(cache_path):
         return send_file(cache_path, mimetype='image/png', max_age=604800)
     try:
+        # NSPD uses a Russian CA chain that is missing from certifi on the
+        # server, so TLS verification has to be disabled for this public tile
+        # endpoint (browser/OS trust stores accept it).
+        try:
+            requests.packages.urllib3.disable_warnings()
+        except Exception:
+            pass
         upstream = requests.get(CADASTRE_TILE_URL.format(z=z, x=x, y=y),
-                                headers=CADASTRE_TILE_HEADERS, timeout=15)
+                                headers=CADASTRE_TILE_HEADERS, timeout=15,
+                                verify=False)
     except requests.RequestException:
         return _empty_cadastre_tile()
     if (upstream.status_code != 200

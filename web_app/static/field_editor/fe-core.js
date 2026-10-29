@@ -46,7 +46,7 @@ FE.initMap = function (baseCoordinates) {
         attribution: '&copy; Росреестр / НСПД',
         maxNativeZoom: 17,
         maxZoom: 20,
-        opacity: 0.9
+        opacity: 0.7
     });
     if (FE.layerVisibility.cadastre) FE.cadastreLayer.addTo(map);
     var baseIcon = L.icon({
